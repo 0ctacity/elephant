@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"elephant/internal/app"
+	"elephant/internal/model"
+	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	transport "elephant/internal/transport/mcp"
@@ -99,5 +102,70 @@ func TestStdioProcess(t *testing.T) {
 		if !bytes.Contains(data, []byte("Remember "+kind)) {
 			t.Fatalf("missing persisted %s: %s", kind, data)
 		}
+	}
+}
+
+func TestRemoteCLIRegistry(t *testing.T) {
+	t.Setenv("ELEPHANT_DB", filepath.Join(t.TempDir(), "remote.zova"))
+	var out, logs bytes.Buffer
+	for _, args := range [][]string{{"identity"}, {"remote", "add", "fedora", "--host", "fedora"}, {"remote", "list"}, {"remote", "remove", "fedora"}} {
+		out.Reset()
+		if err := run(context.Background(), args, &out, &logs); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestReceiveProcessAndRemoteRecall(t *testing.T) {
+	if os.Getenv("ELEPHANT_RECEIVE_TEST") == "1" {
+		if err := run(context.Background(), []string{"receive"}, os.Stdout, os.Stderr); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database := filepath.Join(t.TempDir(), "receive.zova")
+	cwd := t.TempDir()
+	for _, args := range [][]string{{"init", "-q", cwd}, {"-C", cwd, "remote", "add", "origin", "https://github.com/test/cli.git"}} {
+		if out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
+			t.Fatal(string(out), err)
+		}
+	}
+	id := func() string { return uuid.Must(uuid.NewV7()).String() }
+	now := time.Now().UTC()
+	sender := id()
+	m := app.Message{ProtocolVersion: 1, MessageID: id(), SenderElephantID: sender, Project: app.ProjectRef{Identity: "github.com/test/cli", Name: "cli"}, Operation: "entry.send", Entry: &model.Entry{ID: id(), Kind: model.Decision, Title: "Remote choice", Body: "Rationale", ActorID: "claude-session", Status: "active", CreatedAt: now, UpdatedAt: now}}
+	data, _ := json.Marshal(m)
+	for i := 0; i < 2; i++ {
+		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReceiveProcessAndRemoteRecall$")
+		command.Env = append(os.Environ(), "ELEPHANT_RECEIVE_TEST=1", "ELEPHANT_DB="+database)
+		command.Stdin = bytes.NewReader(data)
+		var logs bytes.Buffer
+		command.Stderr = &logs
+		out, err := command.Output()
+		if err != nil {
+			t.Fatal(err, logs.String())
+		}
+		var response app.Response
+		if err = json.Unmarshal(out, &response); err != nil || response.Error != "" || response.EntryID != m.Entry.ID {
+			t.Fatal(string(out), err)
+		}
+	}
+	var out, logs bytes.Buffer
+	if err := run(ctx, []string{"--db", database, "--cwd", cwd, "recall", "--remote", sender}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	var received app.RecallResult
+	if err := json.Unmarshal(out.Bytes(), &received); err != nil || len(received.Decisions) != 1 || received.Decisions[0].ActorID != "claude-session" {
+		t.Fatal(out.String(), err)
+	}
+	out.Reset()
+	if err := run(ctx, []string{"--db", database, "--cwd", cwd, "recall"}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	var local app.RecallResult
+	if err := json.Unmarshal(out.Bytes(), &local); err != nil || len(local.Decisions) != 0 {
+		t.Fatal(out.String(), err)
 	}
 }

@@ -4,7 +4,29 @@ Elephant keeps local project state so a new coding agent can continue where the 
 
 It stores facts, decisions, tasks, and explicit file relationships in one `elephant.zova` database. Git identity and commit metadata give those entries project context. Agents use an MCP stdio server; people can inspect the same state through the CLI.
 
-## Build
+## Install
+
+Once the installer is published on `main` and a stable GitHub release is available:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/0ctacity/elephant/main/install.sh | sh
+```
+
+To install a specific release, including a prerelease:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/0ctacity/elephant/main/install.sh | sh -s -- --version 1.0.0-rc.1
+```
+
+The installer detects Linux ARM64/AMD64, macOS ARM64, or Windows AMD64 under Git Bash. It downloads the matching archive from `0ctacity/elephant`, verifies it against the release's `SHA256SUMS.txt`, then replaces the executable in `~/.local/bin`. It does not use sudo, modify shell configuration, or configure MCP. If that directory is outside your PATH, add it to your PATH or invoke the installed binary by its full path.
+
+Pass `--dir /your/bin/directory` to choose another destination, or set `ELEPHANT_INSTALL_DIR`. Running the installer again upgrades to the selected release. `--repo OWNER/REPO` (or `ELEPHANT_REPO`) supports forks. The default selects the latest **stable** release; use `--version` while only release candidates exist.
+
+Requirements: `curl`, `tar` (or `unzip` for Windows), and `sha256sum` or `shasum`. Git is required when using Elephant with repositories. Go, Zig, and a separate Zova installation are unnecessary for release binaries. On Windows without Git Bash, download and extract the AMD64 ZIP from [GitHub releases](https://github.com/0ctacity/elephant/releases).
+
+You can download and inspect `install.sh` before executing it. Installation does not start Elephant or migrate a database; the database is opened when you run Elephant.
+
+## Build from source
 
 Requirements: Go 1.26.5 or newer, Git, a C compiler, and the native Zova C ABI matching the pinned Go binding (`v1.0.0-rc.2`). The Go binding does not download or build the native library.
 
@@ -125,13 +147,52 @@ Files are normalized repository-relative paths. File graph nodes include project
 
 Entry links must stay within one project. Dependencies are explicit links; Elephant does not schedule tasks or infer dependency completion.
 
+## Sharing state with another Elephant
+
+Each installation keeps its own local truth. Explicit sends create additions in a separate table owned by the sending Elephant on the receiving machine. Normal `recall` never includes those rows. No replication, automatic updates, adoption, or merging occurs.
+
+Install Elephant on both machines and configure an ASH host on the sending machine. Use a repository with a network Git origin on both sides so the normalized project identity matches; local filesystem identities cannot be sent.
+
+```bash
+# On A, in the repository:
+elephant identity
+elephant remote add fedora --backend ash --host fedora
+elephant remote ensure-project fedora
+ELEPHANT_ACTOR_ID=codex-session-1 elephant remote send fedora fact \
+  --title "Integration tests require Podman" \
+  --body "The Linux integration suite depends on Podman." \
+  --file tests/integration.go
+
+# On B, in a clone of the same repository:
+elephant recall --remote SOURCE_ELEPHANT_UUID
+elephant recall
+```
+
+Use A's `elephant identity` result as `SOURCE_ELEPHANT_UUID`. A stable UUIDv7 identity is stored in each `elephant.zova`; restarts preserve it. A separate database has a separate identity, and copying the database copies its identity. Table ownership uses this Elephant ID. Each row independently records `actor_id`, taken from `ELEPHANT_ACTOR_ID` when creating local or outgoing entries; the default is `unknown`. Configure that environment variable on the MCP server process to identify its actor. Receiving never replaces it with the peer identity.
+
+`remote send` supports `fact`, `decision`, and `task`, plus repeatable `--file PATH`, `--relation TYPE:ENTRY_UUID`, `--target-version VERSION`, and `--supersedes DECISION_UUID`. Responses include the new `entry_id`. Entry relations must target an existing row in the same source table. Remote `supersedes` records an explicit relationship; it does not update the earlier decision. Absolute paths and traversal are rejected. Missing targets or invalid relationships roll back the complete message, including its receipt and graph edits.
+
+Manage peers with `remote list` and `remote remove NAME`. Removal deletes only the peer configuration, preserving received state. `remote add` also accepts `--ash-config FILE` and `--elephant-path EXECUTABLE`. After `ensure-project` or a successful send, Elephant pins the peer's ID; an unexpected identity change fails. If B registers A and establishes its identity, B can use that registered name in `recall --remote NAME` instead of the UUID.
+
+`remote recall NAME` contacts that peer to inspect **this installation's source table there**. It returns the result without importing it. In contrast, `recall --remote NAME_OR_UUID` reads a source table already stored locally. These commands preserve source boundaries and return the same bounded context categories as local recall.
+
+MCP adds `list_remotes`, `ensure_remote_project`, `remote_send_fact`, `remote_send_decision`, `remote_send_task`, and `remote_recall`. The latter reads locally received state. Existing local tools retain their local-only behavior.
+
+### Machine protocol and ASH
+
+`elephant receive` reads one version-1 JSON message from stdin and writes one JSON response. Operations are `project.ensure`, `entry.send`, and `project.recall`. Envelopes carry `protocol_version`, UUIDv7 `message_id` and `sender_elephant_id`, a portable `project` (`identity`, `name`), and `operation`. `entry.send` also supplies `entry` (including UUIDv7 `id`, `actor_id`, and timestamps), optional `files`, and optional `relations` (`type`, `entry_id`). Input is limited to 1 MiB; structured rejections have an `error` field. The receiver does not need a local checkout.
+
+Receipts persist in the same transaction as the write. Identical message redelivery succeeds; conflicting reuse of a message ID fails. An identical entry with a new message ID is also accepted once per source table, while conflicting entry content fails. Creating the same project/source table again returns the existing table. Retries must retain the original IDs, timestamps, and payload. Running a fresh human `remote send` command creates a new entry, not a retry; Elephant does not automatically retry uncertain transport failures.
+
+ASH invokes the remote Elephant command and never accesses Zova directly. Current ASH `exec` does not forward stdin, so the adapter uses a shell-quoted POSIX `printf` pipeline to deliver JSON to the receiver. The remote machine needs a POSIX shell. The resulting command is limited to 24 KiB (so large bodies accepted locally may exceed this transport limit), output to 4 MiB, and execution to five minutes. State appears in the ASH command arguments; use this transport only on trusted machines. SSH access is the authentication boundary, and sender IDs are provenance claims supplied by the authenticated caller, not cryptographic identities.
+
 ## Storage and bounds
 
 The default database is `~/Library/Application Support/elephant/elephant.zova` on macOS, and `$XDG_DATA_HOME/elephant/elephant.zova` (or `~/.local/share/elephant/elephant.zova`) elsewhere. Override it with `ELEPHANT_DB` or `--db`. New data directories and database files use owner-only permissions.
 
 Projects with equivalent normalized origin URLs share state, including across clones. Without an origin, the local Git common directory identifies the project, so linked worktrees share state. Adding or changing an origin can select a different project identity; v1 does not merge registries automatically. Entries are project-wide, not branch-scoped.
 
-The database contains a project registry, one generated entry table per project, schema metadata, and the named Zova graph `elephant`. SQL and graph edits share a transaction. Existing databases with incompatible Elephant schemas are rejected; there is no automatic migration from older schemas or Zova formats. Zova may use transient journal files while writing.
+The database contains a project registry, generated local and source-specific remote entry tables, a `project_tables` ownership registry, peer configuration, message receipts, schema metadata, and the named Zova graph `elephant`. SQL and graph edits share a transaction. Elephant schema 1 migrates transactionally to schema 2 on open, preserving existing rows and graphs; older rows receive `actor_id = "unknown"`. Unsupported schema versions and incompatible Zova formats are rejected. Schema 2 databases cannot be opened by older Elephant binaries. Zova may use transient journal files while writing.
 
 Recall returns up to 50 tasks **per unfinished status** (active, blocked, open), 50 active decisions, 50 active facts, 10 completed tasks, and 5 superseded decisions. A `truncated` map identifies categories with more entries. Use the list tools to page through them: default/maximum page size 200. Within each group, entries sort newest first with ID as the tie-breaker. `recall_project` also accepts an exact `target_version` filter.
 

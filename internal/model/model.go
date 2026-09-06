@@ -17,6 +17,7 @@ var (
 	ErrInvalidTransition = errors.New("invalid lifecycle transition")
 	ErrInvalidInput      = errors.New("invalid input")
 	ErrRelationNotFound  = errors.New("relation not found")
+	ErrRemote            = errors.New("remote operation failed")
 	ErrStorage           = errors.New("storage operation failed")
 	ErrSchema            = errors.New("incompatible Elephant schema; explicit migration required")
 )
@@ -30,15 +31,18 @@ const (
 )
 
 type Project struct {
-	ID        string    `json:"id"`
-	Identity  string    `json:"identity"`
-	Name      string    `json:"name"`
-	Remote    string    `json:"remote,omitempty"`
-	TableName string    `json:"table_name"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID               string    `json:"id"`
+	Identity         string    `json:"identity"`
+	Name             string    `json:"name"`
+	Remote           string    `json:"remote,omitempty"`
+	Scope            string    `json:"scope,omitempty"`
+	SourceElephantID string    `json:"source_elephant_id,omitempty"`
+	TableName        string    `json:"table_name"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 type Entry struct {
+	ActorID       string    `json:"actor_id"`
 	ID            string    `json:"id"`
 	Kind          Kind      `json:"kind"`
 	Title         string    `json:"title"`

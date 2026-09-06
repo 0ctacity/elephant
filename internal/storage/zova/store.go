@@ -64,10 +64,13 @@ CREATE TABLE projects(id TEXT PRIMARY KEY,identity TEXT NOT NULL UNIQUE,name TEX
 INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 					return err
 				}
-				return db.CreateGraph(graph)
+				if err := db.CreateGraph(graph); err != nil {
+					return err
+				}
+				return t.migrate()
 			}
 			rows, err := t.query("SELECT value FROM elephant_meta WHERE key='schema_version'")
-			if err != nil || len(rows) != 1 || value(rows[0][0]) != "1" {
+			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2") {
 				return model.ErrSchema
 			}
 			has, err := db.HasGraph(graph)
@@ -76,6 +79,9 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 			}
 			if !has {
 				return model.ErrSchema
+			}
+			if value(rows[0][0]) == "1" {
+				return t.migrate()
 			}
 			return nil
 		})
@@ -193,10 +199,14 @@ func (t *transaction) Project(identity string) (model.Project, error) {
 	if err != nil {
 		return model.Project{}, err
 	}
-	return model.Project{ID: value(r[0]), Identity: value(r[1]), Name: value(r[2]), Remote: value(r[3]), TableName: value(r[4]), CreatedAt: created, UpdatedAt: updated}, nil
+	self, err := t.Identity()
+	if err != nil {
+		return model.Project{}, err
+	}
+	return model.Project{Scope: "local", SourceElephantID: self, ID: value(r[0]), Identity: value(r[1]), Name: value(r[2]), Remote: value(r[3]), TableName: value(r[4]), CreatedAt: created, UpdatedAt: updated}, nil
 }
 func (t *transaction) CreateProject(p model.Project) error {
-	name, err := table(p)
+	_, err := table(p)
 	if err != nil {
 		return err
 	}
@@ -204,7 +214,17 @@ func (t *transaction) CreateProject(p model.Project) error {
 	if err != nil {
 		return err
 	}
-	err = t.db.Exec(`CREATE TABLE ` + name + ` (id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('fact','decision','task')),title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL,target_version TEXT,start_commit TEXT,end_commit TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+	if err = t.createEntryTable(p); err != nil {
+		return err
+	}
+	return t.registerLocal(p)
+}
+func (t *transaction) createEntryTable(p model.Project) error {
+	name, err := table(p)
+	if err != nil {
+		return err
+	}
+	err = t.db.Exec(`CREATE TABLE ` + name + ` (id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('fact','decision','task')),title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL,target_version TEXT,start_commit TEXT,end_commit TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,actor_id TEXT NOT NULL);
 CREATE INDEX ` + name + `_kind_status ON ` + name + `(kind,status,updated_at DESC,id DESC);
 CREATE INDEX ` + name + `_created ON ` + name + `(created_at);
 CREATE INDEX ` + name + `_version ON ` + name + `(target_version);`)
@@ -214,7 +234,7 @@ CREATE INDEX ` + name + `_version ON ` + name + `(target_version);`)
 	return nil
 }
 
-const columns = "id,kind,title,body,status,target_version,start_commit,end_commit,created_at,updated_at"
+const columns = "id,kind,title,body,status,target_version,start_commit,end_commit,created_at,updated_at,actor_id"
 
 func decode(r []*string) (model.Entry, error) {
 	c, err := parseTime(r[8])
@@ -225,7 +245,7 @@ func decode(r []*string) (model.Entry, error) {
 	if err != nil {
 		return model.Entry{}, err
 	}
-	return model.Entry{ID: value(r[0]), Kind: model.Kind(value(r[1])), Title: value(r[2]), Body: value(r[3]), Status: value(r[4]), TargetVersion: r[5], StartCommit: r[6], EndCommit: r[7], CreatedAt: c, UpdatedAt: u}, nil
+	return model.Entry{ID: value(r[0]), ActorID: value(r[10]), Kind: model.Kind(value(r[1])), Title: value(r[2]), Body: value(r[3]), Status: value(r[4]), TargetVersion: r[5], StartCommit: r[6], EndCommit: r[7], CreatedAt: c, UpdatedAt: u}, nil
 }
 func (t *transaction) Get(p model.Project, id string) (model.Entry, error) {
 	name, err := table(p)
@@ -249,14 +269,17 @@ func (t *transaction) Put(p model.Project, e model.Entry) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.query("INSERT INTO "+name+"("+columns+") VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,status=excluded.status,target_version=excluded.target_version,end_commit=excluded.end_commit,updated_at=excluded.updated_at", e.ID, string(e.Kind), e.Title, e.Body, e.Status, e.TargetVersion, e.StartCommit, e.EndCommit, stamp(e.CreatedAt), stamp(e.UpdatedAt))
+	_, err = t.query("INSERT INTO "+name+"("+columns+") VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,status=excluded.status,target_version=excluded.target_version,end_commit=excluded.end_commit,updated_at=excluded.updated_at", e.ID, string(e.Kind), e.Title, e.Body, e.Status, e.TargetVersion, e.StartCommit, e.EndCommit, stamp(e.CreatedAt), stamp(e.UpdatedAt), e.ActorID)
 	if err != nil {
 		return err
 	}
 	if _, err = t.query("UPDATE projects SET updated_at=? WHERE id=?", stamp(e.UpdatedAt), p.ID); err != nil {
 		return err
 	}
-	return t.db.PutGraphNode(native.GraphNodeInput{GraphName: graph, NodeID: "entry:" + e.ID, Kind: string(e.Kind), TargetType: native.GraphTargetRecord, TargetNamespace: &p.TableName, TargetRef: &e.ID})
+	if _, err = t.query("UPDATE project_tables SET updated_at=? WHERE table_name=?", stamp(e.UpdatedAt), p.TableName); err != nil {
+		return err
+	}
+	return t.db.PutGraphNode(native.GraphNodeInput{GraphName: graph, NodeID: model.EntryNode(p, e.ID), Kind: string(e.Kind), TargetType: native.GraphTargetRecord, TargetNamespace: &p.TableName, TargetRef: &e.ID})
 }
 func (t *transaction) List(p model.Project, f model.Filter) ([]model.Entry, error) {
 	name, err := table(p)

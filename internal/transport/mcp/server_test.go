@@ -44,8 +44,12 @@ func TestMCPToolsValidationAndContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 16 {
+	if len(tools.Tools) != 22 {
 		t.Fatalf("tools=%d", len(tools.Tools))
+	}
+	rr, re := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_remotes", Arguments: map[string]any{}})
+	if re != nil || rr.IsError {
+		t.Fatal(rr, re)
 	}
 	for _, args := range []map[string]any{{"title": "missing body"}, {"title": "title", "body": " "}, {"title": "title", "body": "body", "related_files": []string{"../escape"}}} {
 		r, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "add_fact", Arguments: args})

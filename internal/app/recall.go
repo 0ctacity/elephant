@@ -21,8 +21,11 @@ type RecallResult struct {
 }
 
 func (s *Service) Recall(ctx context.Context, cwd, version string) (out RecallResult, err error) {
+	return s.recallWith(ctx, version, func(fn func(storage.Tx, model.Project, gitrepo.Metadata) error) error { return s.within(ctx, cwd, fn) })
+}
+func (s *Service) recallWith(ctx context.Context, version string, within func(func(storage.Tx, model.Project, gitrepo.Metadata) error) error) (out RecallResult, err error) {
 	out = RecallResult{Tasks: []model.Entry{}, Decisions: []model.Entry{}, Facts: []model.Entry{}, RecentCompleted: []model.Entry{}, RecentSuperseded: []model.Entry{}, Relations: []model.Relation{}, Truncated: map[string]bool{}}
-	err = s.within(ctx, cwd, func(tx storage.Tx, p model.Project, g gitrepo.Metadata) error {
+	err = within(func(tx storage.Tx, p model.Project, g gitrepo.Metadata) error {
 		out.Project = p
 		out.Git = g
 		for _, group := range []struct {
@@ -46,7 +49,7 @@ func (s *Service) Recall(ctx context.Context, cwd, version string) (out RecallRe
 			}
 			*group.dest = append(*group.dest, entries...)
 			for _, e := range entries {
-				links, err := tx.Relations("entry:" + e.ID)
+				links, err := tx.Relations(model.EntryNode(p, e.ID))
 				if err != nil {
 					return err
 				}

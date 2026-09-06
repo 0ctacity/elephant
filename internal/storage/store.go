@@ -12,6 +12,14 @@ type Store interface {
 	Transact(context.Context, func(Tx) error) error
 }
 type Tx interface {
+	Identity() (string, error)
+	EnsureSource(model.Project, string) (model.Project, error)
+	Source(string, string) (model.Project, error)
+	Message(string, string, string) (bool, error)
+	Remotes() ([]model.Remote, error)
+	SaveRemote(model.Remote) error
+	RemoveRemote(string) error
+
 	Project(string) (model.Project, error)
 	CreateProject(model.Project) error
 	Get(model.Project, string) (model.Entry, error)

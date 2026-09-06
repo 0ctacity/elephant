@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -68,6 +69,11 @@ func resolve(tx storage.Tx, g gitrepo.Metadata) (model.Project, error) {
 	}
 	now := time.Now().UTC()
 	p = model.Project{ID: "prj_" + id.String(), Identity: g.Identity, Name: g.Name, Remote: g.Remote, TableName: "p_" + strings.ReplaceAll(id.String(), "-", ""), CreatedAt: now, UpdatedAt: now}
+	p.Scope = "local"
+	p.SourceElephantID, err = tx.Identity()
+	if err != nil {
+		return p, err
+	}
 	return p, tx.CreateProject(p)
 }
 func (s *Service) within(ctx context.Context, cwd string, fn func(storage.Tx, model.Project, gitrepo.Metadata) error) error {
@@ -126,7 +132,7 @@ func (s *Service) Add(ctx context.Context, cwd string, k model.Kind, in CreateIn
 			return err
 		}
 		now := time.Now().UTC()
-		e := model.Entry{ID: id.String(), Kind: k, Title: in.Title, Body: in.Body, Status: model.DefaultStatus(k), TargetVersion: in.TargetVersion, StartCommit: optional(g.Head), CreatedAt: now, UpdatedAt: now}
+		e := model.Entry{ID: id.String(), ActorID: currentActor(), Kind: k, Title: in.Title, Body: in.Body, Status: model.DefaultStatus(k), TargetVersion: in.TargetVersion, StartCommit: optional(g.Head), CreatedAt: now, UpdatedAt: now}
 		if err = e.Validate(); err != nil {
 			return err
 		}
@@ -264,4 +270,11 @@ func attach(tx storage.Tx, p model.Project, e model.Entry, files []string, links
 		return fmt.Errorf("%w: at most 100 outgoing relations per entry", model.ErrInvalidInput)
 	}
 	return nil
+}
+
+func currentActor() string {
+	if a := os.Getenv("ELEPHANT_ACTOR_ID"); a != "" {
+		return a
+	}
+	return "unknown"
 }

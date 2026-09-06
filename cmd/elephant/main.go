@@ -19,6 +19,7 @@ import (
 	"elephant/internal/model"
 	"elephant/internal/storage/zova"
 	transport "elephant/internal/transport/mcp"
+	"elephant/internal/transport/receive"
 )
 
 func main() {
@@ -36,12 +37,17 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
 
   serve                 Run the MCP stdio server (also the default command)
   recall                Show saved project context and unfinished work
+  identity              Show this installation’s stable Elephant ID
+  remote                Manage peers, ensure projects, send entries, or fetch state
+  receive               Process one machine JSON message from stdin
   status                Show project identity and Git metadata
   facts|decisions|tasks  List entries (--status, --target-version, --limit, --offset)
   inspect ID            Show an entry and its relationships
   add fact|decision|task --title TEXT --body TEXT [--target-version TEXT] [--file PATH ...]
   --version             Print version
 
+Use recall --remote NAME_OR_UUID for a locally stored remote source table.
+ELEPHANT_ACTOR_ID identifies the actor creating rows (default: unknown).
 ELEPHANT_DB overrides the default database path.
 ELEPHANT_LOG_LEVEL accepts debug, info, warn, or error. Logs go to stderr.
 `
@@ -120,20 +126,43 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 	service := app.New(db)
 	var result any
 	switch command {
+	case "receive":
+		if len(rest) != 0 {
+			return model.ErrInvalidInput
+		}
+		return receive.Handle(ctx, service, os.Stdin, out)
+	case "identity":
+		if len(rest) != 0 {
+			return model.ErrInvalidInput
+		}
+		result, err = service.Identity(ctx)
+	case "remote":
+		result, err = runRemote(ctx, service, *cwd, rest, logs)
 	case "serve":
 		if len(rest) != 0 {
 			return fmt.Errorf("%w: serve takes no arguments", model.ErrInvalidInput)
 		}
 		return transport.New(service, *cwd).Run(ctx, &sdk.StdioTransport{})
-	case "recall", "status":
-		if len(rest) != 0 {
-			return fmt.Errorf("%w: unexpected arguments", model.ErrInvalidInput)
+	case "recall":
+		f := flag.NewFlagSet("recall", flag.ContinueOnError)
+		f.SetOutput(logs)
+		source := f.String("remote", "", "source Elephant UUID or registered name")
+		if err = f.Parse(rest); err != nil {
+			return err
 		}
-		if command == "recall" {
+		if f.NArg() != 0 {
+			return model.ErrInvalidInput
+		}
+		if *source == "" {
 			result, err = service.Recall(ctx, *cwd, "")
 		} else {
-			result, err = service.Status(ctx, *cwd)
+			result, err = service.RecallRemote(ctx, *cwd, *source)
 		}
+	case "status":
+		if len(rest) != 0 {
+			return model.ErrInvalidInput
+		}
+		result, err = service.Status(ctx, *cwd)
 	case "facts", "decisions", "tasks":
 		list := flag.NewFlagSet(command, flag.ContinueOnError)
 		list.SetOutput(logs)
