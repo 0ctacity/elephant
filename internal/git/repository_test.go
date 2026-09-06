@@ -68,9 +68,13 @@ func TestInspectSanitizesOriginRemote(t *testing.T) {
 
 func TestInspectLocalOriginRemoteForms(t *testing.T) {
 	repo := newRepository(t)
-	repoRoot := gitOutput(t, repo, "rev-parse", "--show-toplevel")
+	repoRoot := normalizedGitPath(gitOutput(t, repo, "rev-parse", "--show-toplevel"))
 	remotePath := filepath.Join(t.TempDir(), "remote.git")
-	fileRemote := (&url.URL{Scheme: "file", Path: remotePath}).String()
+	filePath := filepath.ToSlash(remotePath)
+	if isWindowsDrivePath(filePath) {
+		filePath = "/" + filePath
+	}
+	fileRemote := (&url.URL{Scheme: "file", Path: filePath}).String()
 	tests := []struct {
 		name string
 		raw  string
@@ -95,10 +99,55 @@ func TestInspectLocalOriginRemoteForms(t *testing.T) {
 	}
 }
 
+func TestNormalizeLocalRemoteDrivePathIsNotScp(t *testing.T) {
+	for _, raw := range []string{`C:/work/repo.git`, `C:\work\repo.git`} {
+		t.Run(raw, func(t *testing.T) {
+			got, ok, err := normalizeLocalRemote(raw, `C:/workspace`)
+			if err != nil {
+				t.Fatalf("normalizeLocalRemote(%q): %v", raw, err)
+			}
+			if !ok {
+				t.Fatalf("normalizeLocalRemote(%q) classified a drive path as an SSH scp remote", raw)
+			}
+			want := filepath.Clean(filepath.FromSlash(raw))
+			if got != want {
+				t.Errorf("normalizeLocalRemote(%q) = %q, want %q", raw, got, want)
+			}
+		})
+	}
+}
+
+func TestNormalizeLocalRemoteWindowsFileURLs(t *testing.T) {
+	for _, raw := range []string{"file:///C:/work/repo.git", "file://C:/work/repo.git"} {
+		t.Run(raw, func(t *testing.T) {
+			got, ok, err := normalizeLocalRemote(raw, `C:/workspace`)
+			if err != nil {
+				t.Fatalf("normalizeLocalRemote(%q): %v", raw, err)
+			}
+			if !ok {
+				t.Fatalf("normalizeLocalRemote(%q) was not classified as local", raw)
+			}
+			want := filepath.Clean(filepath.FromSlash("C:/work/repo.git"))
+			if got != want {
+				t.Errorf("normalizeLocalRemote(%q) = %q, want %q", raw, got, want)
+			}
+		})
+	}
+}
+
+func TestRepositoryNameHandlesWindowsLocalIdentity(t *testing.T) {
+	if got := repositoryName(`local:C:\Users\example\repo`, `/unused`); got != "repo" {
+		t.Errorf("repositoryName() = %q, want repo", got)
+	}
+	if got := repositoryName(`local:\\server\share\repo`, `/unused`); got != "repo" {
+		t.Errorf("repositoryName() UNC = %q, want repo", got)
+	}
+}
+
 func TestInspectIgnoresGitRepositoryLocationEnvironment(t *testing.T) {
 	target := newRepositoryWithoutRemote(t)
 	redirect := newRepositoryWithoutRemote(t)
-	targetRoot := gitOutput(t, target, "rev-parse", "--show-toplevel")
+	targetRoot := normalizedGitPath(gitOutput(t, target, "rev-parse", "--show-toplevel"))
 	targetHead := gitOutput(t, target, "rev-parse", "HEAD")
 	t.Setenv("GIT_DIR", filepath.Join(redirect, ".git"))
 	t.Setenv("GIT_WORK_TREE", redirect)
@@ -132,7 +181,7 @@ func TestNormalizeRemotePreservesPathCaseAndDropsCredentials(t *testing.T) {
 func TestInspectNestedDirtyRepository(t *testing.T) {
 	repo := newRepository(t)
 	commit := gitOutput(t, repo, "rev-parse", "HEAD")
-	wantRoot := gitOutput(t, repo, "rev-parse", "--show-toplevel")
+	wantRoot := normalizedGitPath(gitOutput(t, repo, "rev-parse", "--show-toplevel"))
 	if err := os.MkdirAll(filepath.Join(repo, "nested", "deeper"), 0o755); err != nil {
 		t.Fatalf("mkdir nested cwd: %v", err)
 	}
@@ -180,7 +229,7 @@ func TestInspectNestedDirtyRepository(t *testing.T) {
 func TestInspectUnbornRepositoryAllowsEmptyHead(t *testing.T) {
 	repo := t.TempDir()
 	gitOutput(t, repo, "init")
-	wantRoot := gitOutput(t, repo, "rev-parse", "--show-toplevel")
+	wantRoot := normalizedGitPath(gitOutput(t, repo, "rev-parse", "--show-toplevel"))
 	if err := os.Mkdir(filepath.Join(repo, "nested"), 0o755); err != nil {
 		t.Fatalf("mkdir nested cwd: %v", err)
 	}
@@ -218,8 +267,8 @@ func TestInspectLocalWorktreesShareIdentity(t *testing.T) {
 	mainRepo := newRepositoryWithoutRemote(t)
 	worktree := filepath.Join(t.TempDir(), "linked-worktree")
 	gitOutput(t, mainRepo, "worktree", "add", "-b", "feature", worktree)
-	wantMainRoot := gitOutput(t, mainRepo, "rev-parse", "--show-toplevel")
-	wantWorktreeRoot := gitOutput(t, worktree, "rev-parse", "--show-toplevel")
+	wantMainRoot := normalizedGitPath(gitOutput(t, mainRepo, "rev-parse", "--show-toplevel"))
+	wantWorktreeRoot := normalizedGitPath(gitOutput(t, worktree, "rev-parse", "--show-toplevel"))
 
 	mainMetadata, err := Inspect(context.Background(), mainRepo)
 	if err != nil {
@@ -246,7 +295,7 @@ func TestInspectSeparateGitDirIdentityUsesCommonDir(t *testing.T) {
 	repo := t.TempDir()
 	commonDir := filepath.Join(t.TempDir(), "git-metadata")
 	gitOutput(t, repo, "init", "--separate-git-dir", commonDir)
-	wantCommonDir := gitOutput(t, repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	wantCommonDir := normalizedGitPath(gitOutput(t, repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
 
 	metadata, err := Inspect(context.Background(), repo)
 	if err != nil {
@@ -302,4 +351,8 @@ func gitOutput(t *testing.T, cwd string, args ...string) string {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func normalizedGitPath(path string) string {
+	return filepath.Clean(filepath.FromSlash(path))
 }

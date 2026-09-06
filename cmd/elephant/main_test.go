@@ -12,11 +12,16 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	transport "elephant/internal/transport/mcp"
 )
 
 func TestVersionAndCLI(t *testing.T) {
+	previous := transport.Version
+	transport.Version = "1.2.3-rc.4"
+	t.Cleanup(func() { transport.Version = previous })
 	var out, logs bytes.Buffer
-	if err := run(context.Background(), []string{"--version"}, &out, &logs); err != nil || !strings.Contains(out.String(), "1.0.0") {
+	if err := run(context.Background(), []string{"--version"}, &out, &logs); err != nil || out.String() != "elephant 1.2.3-rc.4\n" {
 		t.Fatal(out.String(), err)
 	}
 	cwd := t.TempDir()

@@ -285,6 +285,9 @@ func normalizeLocalRemote(raw, root string) (path string, ok bool, err error) {
 	if raw == "" {
 		return "", false, nil
 	}
+	if isWindowsDrivePath(raw) {
+		return resolveLocalPath(raw, root), true, nil
+	}
 
 	if strings.HasPrefix(strings.ToLower(raw), "file:") {
 		parsed, parseErr := url.Parse(raw)
@@ -295,8 +298,13 @@ func normalizeLocalRemote(raw, root string) (path string, ok bool, err error) {
 		if path == "" {
 			path = parsed.Opaque
 		}
-		if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+		if isWindowsDrivePath(parsed.Host + path) {
+			path = parsed.Host + path
+		} else if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
 			path = "//" + parsed.Host + "/" + strings.TrimLeft(path, "/")
+		}
+		if strings.HasPrefix(path, "/") && isWindowsDrivePath(path[1:]) {
+			path = path[1:]
 		}
 		if path == "" {
 			return "", true, errors.New("local file remote has no path")
@@ -315,7 +323,7 @@ func normalizeLocalRemote(raw, root string) (path string, ok bool, err error) {
 }
 
 func resolveLocalPath(path, root string) string {
-	if !filepath.IsAbs(path) {
+	if !filepath.IsAbs(path) && !isWindowsDrivePath(path) {
 		path = filepath.Join(root, path)
 	}
 	path = filepath.Clean(path)
@@ -326,6 +334,17 @@ func resolveLocalPath(path, root string) string {
 }
 
 func repositoryName(identity, root string) string {
+	if strings.HasPrefix(identity, "local:") {
+		localPath := strings.TrimPrefix(identity, "local:")
+		windowsLocalPath := isWindowsDrivePath(localPath) ||
+			strings.HasPrefix(localPath, `\`) ||
+			(filepath.Separator == '\\' && strings.Contains(localPath, `\`))
+		if windowsLocalPath {
+			if slash := strings.LastIndexAny(localPath, `/\`); slash >= 0 && slash+1 < len(localPath) {
+				return localPath[slash+1:]
+			}
+		}
+	}
 	if slash := strings.LastIndexByte(identity, '/'); slash >= 0 && slash+1 < len(identity) {
 		return identity[slash+1:]
 	}
@@ -333,6 +352,9 @@ func repositoryName(identity, root string) string {
 }
 
 func parseScpRemote(raw string) (host, path string, ok bool) {
+	if isWindowsDrivePath(raw) {
+		return "", "", false
+	}
 	colon := strings.IndexByte(raw, ':')
 	if colon <= 0 || strings.Contains(raw[:colon], "/") || strings.Contains(raw[:colon], "\\") {
 		return "", "", false
@@ -357,6 +379,9 @@ func sanitizeRemote(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
+	}
+	if isWindowsDrivePath(raw) {
+		return raw
 	}
 	if host, path, ok := parseScpRemote(raw); ok {
 		userHost := raw[:strings.IndexByte(raw, ':')]
@@ -393,4 +418,15 @@ func stripRemoteQuery(path string) string {
 		return path[:index]
 	}
 	return path
+}
+
+func isWindowsDrivePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' {
+		return false
+	}
+	letter := path[0]
+	if !((letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z')) {
+		return false
+	}
+	return path[2] == '/' || path[2] == '\\'
 }

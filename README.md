@@ -6,7 +6,7 @@ It stores facts, decisions, tasks, and explicit file relationships in one `eleph
 
 ## Build
 
-Requirements: Go 1.26.5 or newer, Git, a C compiler, and the native Zova C ABI matching the pinned Go binding (`v0.26.1`). The Go binding does not download or build the native library.
+Requirements: Go 1.26.5 or newer, Git, a C compiler, and the native Zova C ABI matching the pinned Go binding (`v1.0.0-rc.2`). The Go binding does not download or build the native library.
 
 Obtain the matching native library from [Zova](https://github.com/ata-sesli/zova), or build that version with `zig build c-abi` in its source checkout. Then, from the Elephant directory:
 
@@ -18,6 +18,32 @@ go build -o bin/elephant ./cmd/elephant
 ```
 
 For an installed C ABI archive, point these flags at its `include` and `lib` directories instead. The binding already supplies `-lzova_c`. Keep the native header and library from the same Zova version.
+
+## CI and GitHub releases
+
+[The GitHub Actions workflow](.github/workflows/ci.yml) tests every branch push and pull request on exactly these four native runners:
+
+| Platform | Runner | Release archive |
+| --- | --- | --- |
+| Linux ARM64 | `ubuntu-24.04-arm` | `elephant-vVERSION-linux-arm64.tar.gz` |
+| Linux AMD64 | `ubuntu-24.04` | `elephant-vVERSION-linux-amd64.tar.gz` |
+| Windows AMD64 | `windows-2022` | `elephant-vVERSION-windows-amd64.zip` |
+| macOS ARM64 | `macos-15` | `elephant-vVERSION-macos-arm64.tar.gz` |
+
+Each job checks formatting, verifies Go dependencies, builds Zova's native C ABI from the pinned `v1.0.0-rc.2` commit with Zig 0.16.0, runs tests (including MCP stdio and race checks), runs `go vet`, and builds and smoke-tests Elephant. The Windows native library uses the GNU ABI; macOS targets version 14 or newer. Linux artifacts target glibc-based distributions and are built on Ubuntu 24.04.
+
+Once the workflow is on GitHub, push a version tag to publish a release:
+
+```sh
+git tag v1.0.0-rc.1
+git push origin v1.0.0-rc.1
+```
+
+All four jobs must pass before publishing. Tags such as `v1.0.0-rc.1` create prereleases; tags such as `v1.0.0` create stable releases. The archive contains the executable, README, and dependency license notices. A `SHA256SUMS.txt` file accompanies the four archives. The release stays a draft until all assets are uploaded; rerunning a failed upload can resume the draft, but published assets are not overwritten.
+
+The executable's `--version` and MCP server version come from the tag. Untagged CI builds report `dev-COMMIT`; ordinary local builds report `dev`. Git must be installed at runtime; the native Zova library is linked into the executable.
+
+Only the publishing job receives `contents: write`; it uses GitHub's built-in token, so no extra release secret is needed. A manual workflow run builds and tests without publishing. Update both `go.mod` and the workflow's `ZOVA_VERSION`/`ZOVA_COMMIT` when changing Zova versions.
 
 ## Try it
 

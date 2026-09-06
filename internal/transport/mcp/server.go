@@ -13,7 +13,8 @@ import (
 	"elephant/internal/model"
 )
 
-const Version = "1.0.0"
+// Version is set from the release tag with go build -ldflags -X.
+var Version = "dev"
 
 type scope struct {
 	CWD string `json:"cwd,omitempty" jsonschema:"Repository working directory; defaults to the server working directory"`
