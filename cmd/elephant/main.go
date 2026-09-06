@@ -35,7 +35,7 @@ const usage = `Elephant — local continuity for coding agents
 Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
 
   serve                 Run the MCP stdio server (also the default command)
-  orient                Show active knowledge, unfinished work, and recent history
+  recall                Show saved project context and unfinished work
   status                Show project identity and Git metadata
   facts|decisions|tasks  List entries (--status, --target-version, --limit, --offset)
   inspect ID            Show an entry and its relationships
@@ -125,12 +125,12 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 			return fmt.Errorf("%w: serve takes no arguments", model.ErrInvalidInput)
 		}
 		return transport.New(service, *cwd).Run(ctx, &sdk.StdioTransport{})
-	case "orient", "status":
+	case "recall", "status":
 		if len(rest) != 0 {
 			return fmt.Errorf("%w: unexpected arguments", model.ErrInvalidInput)
 		}
-		if command == "orient" {
-			result, err = service.Orient(ctx, *cwd, "")
+		if command == "recall" {
+			result, err = service.Recall(ctx, *cwd, "")
 		} else {
 			result, err = service.Status(ctx, *cwd)
 		}

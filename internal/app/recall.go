@@ -8,7 +8,7 @@ import (
 	"elephant/internal/storage"
 )
 
-type Orientation struct {
+type RecallResult struct {
 	Project          model.Project    `json:"project"`
 	Git              gitrepo.Metadata `json:"git"`
 	Tasks            []model.Entry    `json:"tasks"`
@@ -20,8 +20,8 @@ type Orientation struct {
 	Truncated        map[string]bool  `json:"truncated"`
 }
 
-func (s *Service) Orient(ctx context.Context, cwd, version string) (out Orientation, err error) {
-	out = Orientation{Tasks: []model.Entry{}, Decisions: []model.Entry{}, Facts: []model.Entry{}, RecentCompleted: []model.Entry{}, RecentSuperseded: []model.Entry{}, Relations: []model.Relation{}, Truncated: map[string]bool{}}
+func (s *Service) Recall(ctx context.Context, cwd, version string) (out RecallResult, err error) {
+	out = RecallResult{Tasks: []model.Entry{}, Decisions: []model.Entry{}, Facts: []model.Entry{}, RecentCompleted: []model.Entry{}, RecentSuperseded: []model.Entry{}, Relations: []model.Relation{}, Truncated: map[string]bool{}}
 	err = s.within(ctx, cwd, func(tx storage.Tx, p model.Project, g gitrepo.Metadata) error {
 		out.Project = p
 		out.Git = g

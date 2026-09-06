@@ -76,7 +76,7 @@ func TestContinuityAcrossRestartAndProjects(t *testing.T) {
 	}
 	defer store.Close()
 	s = app.New(store)
-	packet, err := s.Orient(ctx, cwd, "")
+	packet, err := s.Recall(ctx, cwd, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestContinuityAcrossRestartAndProjects(t *testing.T) {
 	}
 }
 
-func TestOrientationBoundsAndVersionFilter(t *testing.T) {
+func TestRecallResultBoundsAndVersionFilter(t *testing.T) {
 	ctx := context.Background()
 	cwd := repo(t)
 	db, err := zova.Open(filepath.Join(t.TempDir(), "bounded.zova"))
@@ -113,11 +113,11 @@ func TestOrientationBoundsAndVersionFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	packet, err := s.Orient(ctx, cwd, "v1")
+	packet, err := s.Recall(ctx, cwd, "v1")
 	if err != nil || len(packet.Facts) != 50 || !packet.Truncated["facts"] {
 		t.Fatal(packet, err)
 	}
-	none, err := s.Orient(ctx, cwd, "v2")
+	none, err := s.Recall(ctx, cwd, "v2")
 	if err != nil || len(none.Facts) != 0 {
 		t.Fatal(none, err)
 	}

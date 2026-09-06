@@ -66,12 +66,12 @@ func TestMCPToolsValidationAndContinuity(t *testing.T) {
 	if err != nil || r.IsError {
 		t.Fatal(r, err)
 	}
-	r, err = session.CallTool(ctx, &sdk.CallToolParams{Name: "orient_project", Arguments: map[string]any{}})
+	r, err = session.CallTool(ctx, &sdk.CallToolParams{Name: "recall_project", Arguments: map[string]any{}})
 	if err != nil || r.IsError {
 		t.Fatal(r, err)
 	}
 	data, _ = json.Marshal(r.StructuredContent)
-	var packet app.Orientation
+	var packet app.RecallResult
 	if err = json.Unmarshal(data, &packet); err != nil || len(packet.RecentCompleted) != 1 {
 		t.Fatalf("%s %v", data, err)
 	}

@@ -35,7 +35,7 @@ func TestVersionAndCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := run(context.Background(), []string{"--cwd", cwd, "orient"}, &out, &logs); err != nil {
+	if err := run(context.Background(), []string{"--cwd", cwd, "recall"}, &out, &logs); err != nil {
 		t.Fatal(err)
 	}
 	if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), "Testing") {
@@ -72,7 +72,7 @@ func TestStdioProcess(t *testing.T) {
 			t.Fatal(r, err)
 		}
 	}
-	r, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "orient_project", Arguments: map[string]any{"cwd": cwd}})
+	r, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "recall_project", Arguments: map[string]any{"cwd": cwd}})
 	if err != nil || r.IsError {
 		t.Fatal(r, err)
 	}
@@ -87,7 +87,7 @@ func TestStdioProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	r, err = session.CallTool(ctx, &sdk.CallToolParams{Name: "orient_project", Arguments: map[string]any{"cwd": cwd}})
+	r, err = session.CallTool(ctx, &sdk.CallToolParams{Name: "recall_project", Arguments: map[string]any{"cwd": cwd}})
 	if err != nil || r.IsError {
 		t.Fatal(r, err)
 	}
