@@ -118,7 +118,12 @@ jobs:
             root="$PWD"
           fi
           echo "CGO_CFLAGS=-I$root/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-L$root/zig-out/lib" >> "$GITHUB_ENV"
+          ldflags="-L$root/zig-out/lib"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # Zova's Zig runtime calls NT APIs; MinGW does not link NTDLL by default.
+            ldflags="$ldflags -lntdll"
+          fi
+          echo "CGO_LDFLAGS=$ldflags" >> "$GITHUB_ENV"
           if [[ "$RUNNER_OS" == macOS ]]; then
             echo 'MACOSX_DEPLOYMENT_TARGET=14.0' >> "$GITHUB_ENV"
           fi
