@@ -99,6 +99,8 @@ jobs:
           ref: ${{ env.ZOVA_COMMIT }}
           path: .deps/zova
           persist-credentials: false
+      - name: Include Zig runtime for external CGO linkers
+        run: python scripts/prepare_zova.py .deps/zova/build.zig
       - name: Build Zova C ABI
         working-directory: .deps/zova
         env:

@@ -52,7 +52,7 @@ For an installed C ABI archive, point these flags at its `include` and `lib` dir
 | Windows AMD64 | `windows-2022` | `elephant-vVERSION-windows-amd64.zip` |
 | macOS ARM64 | `macos-15` | `elephant-vVERSION-macos-arm64.tar.gz` |
 
-Each job checks formatting, verifies Go dependencies, builds Zova's native C ABI from the pinned `v1.0.0-rc.2` commit with Zig 0.16.0, runs tests (including MCP stdio and race checks), runs `go vet`, and builds and smoke-tests Elephant. The Windows native library uses the GNU ABI; macOS targets version 14 or newer. Linux artifacts target glibc-based distributions and are built on Ubuntu 24.04.
+Each job checks formatting, verifies Go dependencies, builds Zova's native C ABI from the pinned `v1.0.0-rc.2` commit with Zig 0.16.0, bundles Zig’s compiler runtime in the static archive for CGO linking, runs tests (including MCP stdio and race checks), runs `go vet`, and builds and smoke-tests Elephant. The Windows native library uses the GNU ABI; macOS targets version 14 or newer. Linux artifacts target glibc-based distributions and are built on Ubuntu 24.04.
 
 Once the workflow is on GitHub, push a version tag to publish a release:
 
