@@ -234,3 +234,5 @@ func (t *fakeTx) AdoptionsBySource(identity, source string) ([]model.Adoption, e
 	sort.Slice(out, func(i, j int) bool { return out[i].SourceEntryID < out[j].SourceEntryID })
 	return out, nil
 }
+
+func (f *fakeStore) Backup(string) error { return nil }

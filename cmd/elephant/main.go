@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -53,6 +54,9 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
              [--commands TEXT ...] [--failures TEXT ...]
              [--file PATH ...] [--relation TYPE:ID ...] [--start-commit COMMIT]
   checkpoints [--limit N] [--offset N]  List session checkpoints
+  export [--project]    Write versioned project JSON to stdout
+  import FILE [--as-remote NAME]  Load an export into a separate source table
+  backup --output FILE.zova  Write a consistent database snapshot
   add fact|decision|task --title TEXT --body TEXT [--target-version TEXT] [--file PATH ...]
   remote send fact --title TEXT --body TEXT [--evidence EVIDENCE_ID ...]
                    [--file PATH ...] [--relation TYPE:ENTRY_UUID ...]
@@ -69,6 +73,8 @@ reports unchanged, changed, missing, or unavailable and never retires a fact.
 'remote send --evidence' carries a local evidence row with the sent fact;
 the receiver re-verifies it against its own checkout on recall.
 recall includes the latest checkpoint before older project context.
+Export output is deterministic for unchanged state; import validates fully
+before committing and never overwrites local truth.
 ELEPHANT_ACTOR_ID identifies the actor creating rows (default: unknown).
 ELEPHANT_DB overrides the default database path.
 ELEPHANT_LOG_LEVEL accepts debug, info, warn, or error. Logs go to stderr.
@@ -96,6 +102,17 @@ type fileFlags []string
 
 func (f *fileFlags) String() string     { return fmt.Sprint([]string(*f)) }
 func (f *fileFlags) Set(s string) error { *f = append(*f, s); return nil }
+
+func readImportFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 32<<20 {
+		return nil, fmt.Errorf("%w: import file too large", model.ErrInvalidInput)
+	}
+	return data, nil
+}
 func run(ctx context.Context, args []string, out, logs io.Writer) error {
 	fs := flag.NewFlagSet("elephant", flag.ContinueOnError)
 	fs.SetOutput(logs)
@@ -251,6 +268,50 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 			return fmt.Errorf("%w: adopt requires ENTRY_ID --from NAME_OR_UUID", model.ErrInvalidInput)
 		}
 		result, err = service.Adopt(ctx, *cwd, adopt.Arg(0), *from)
+	case "export":
+		f := flag.NewFlagSet("export", flag.ContinueOnError)
+		f.SetOutput(logs)
+		project := f.String("project", "", "reserved scope selector (current project)")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() != 0 || (*project != "" && *project != "current") {
+			return fmt.Errorf("%w: export takes no positional arguments", model.ErrInvalidInput)
+		}
+		result, err = service.Export(ctx, *cwd)
+	case "import":
+		f := flag.NewFlagSet("import", flag.ContinueOnError)
+		f.SetOutput(logs)
+		asRemote := f.String("as-remote", "archive", "archive source name")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() != 1 {
+			return fmt.Errorf("%w: import requires one FILE argument", model.ErrInvalidInput)
+		}
+		data, readErr := readImportFile(f.Arg(0))
+		if readErr != nil {
+			return readErr
+		}
+		var env app.ExportEnvelope
+		if err = json.Unmarshal(data, &env); err != nil {
+			return fmt.Errorf("%w: invalid export JSON: %v", model.ErrInvalidInput, err)
+		}
+		result, err = service.Import(ctx, env, *asRemote)
+	case "backup":
+		f := flag.NewFlagSet("backup", flag.ContinueOnError)
+		f.SetOutput(logs)
+		output := f.String("output", "", "destination .zova file")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() != 0 || *output == "" {
+			return fmt.Errorf("%w: backup requires --output FILE.zova", model.ErrInvalidInput)
+		}
+		if filepath.Ext(*output) != ".zova" {
+			return fmt.Errorf("%w: backup destination must end in .zova", model.ErrInvalidInput)
+		}
+		result, err = map[string]string{"backup": *output}, service.Backup(ctx, *output)
 	default:
 		return fmt.Errorf("%w: unknown command %q; use --help", model.ErrInvalidInput, command)
 	}

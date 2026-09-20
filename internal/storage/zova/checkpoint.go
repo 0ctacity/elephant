@@ -39,12 +39,46 @@ func (t *transaction) migrateCheckpoints() error {
 			}
 		}
 	}
-	err = t.db.Exec(`CREATE TABLE IF NOT EXISTS checkpoints(id TEXT PRIMARY KEY,project_table TEXT NOT NULL,summary TEXT NOT NULL,completed TEXT NOT NULL,next TEXT NOT NULL,commands TEXT NOT NULL,failures TEXT NOT NULL,actor_id TEXT NOT NULL,start_commit TEXT,end_commit TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+	err = t.db.Exec(`CREATE TABLE IF NOT EXISTS checkpoints(id TEXT NOT NULL,project_table TEXT NOT NULL,summary TEXT NOT NULL,completed TEXT NOT NULL,next TEXT NOT NULL,commands TEXT NOT NULL,failures TEXT NOT NULL,actor_id TEXT NOT NULL,start_commit TEXT,end_commit TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(project_table,id));
 CREATE INDEX IF NOT EXISTS checkpoints_project ON checkpoints(project_table,created_at DESC,id DESC);`)
 	if err != nil {
 		return fmt.Errorf("%w: %w", model.ErrStorage, err)
 	}
 	_, err = t.query("UPDATE elephant_meta SET value='4' WHERE key='schema_version'")
+	return err
+}
+
+// migrateCheckpointKeys upgrades schema 4 by rebuilding the checkpoints table
+// with a table-scoped primary key, so an imported archive can hold the same
+// checkpoint ID as the local table without stealing the row. It is idempotent
+// and transactional with the version stamp.
+func (t *transaction) migrateCheckpointKeys() error {
+	cols, err := t.query("PRAGMA table_info(checkpoints)")
+	if err != nil {
+		return err
+	}
+	scoped := false
+	for _, column := range cols {
+		if len(column) > 5 && value(column[1]) == "id" && value(column[5]) != "1" {
+			// pk position 0 means id is not (part of) the declared primary key
+			// in SQLite's convention; column[5] is the pk index (1-based). Any
+			// value other than 1 means id alone is no longer the whole key.
+			scoped = true
+			break
+		}
+	}
+	if !scoped {
+		if err = t.db.Exec(`CREATE TABLE checkpoints_v5(id TEXT NOT NULL,project_table TEXT NOT NULL,summary TEXT NOT NULL,completed TEXT NOT NULL,next TEXT NOT NULL,commands TEXT NOT NULL,failures TEXT NOT NULL,actor_id TEXT NOT NULL,start_commit TEXT,end_commit TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(project_table,id));
+INSERT INTO checkpoints_v5 SELECT * FROM checkpoints;
+DROP TABLE checkpoints;
+ALTER TABLE checkpoints_v5 RENAME TO checkpoints;`); err != nil {
+			return fmt.Errorf("%w: %w", model.ErrStorage, err)
+		}
+	}
+	if err = t.db.Exec(`CREATE INDEX IF NOT EXISTS checkpoints_project ON checkpoints(project_table,created_at DESC,id DESC);`); err != nil {
+		return fmt.Errorf("%w: %w", model.ErrStorage, err)
+	}
+	_, err = t.query("UPDATE elephant_meta SET value='5' WHERE key='schema_version'")
 	return err
 }
 
@@ -180,7 +214,7 @@ func (t *transaction) PutCheckpoint(p model.Project, c model.Checkpoint) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.query("INSERT INTO checkpoints("+checkpointColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary,completed=excluded.completed,next=excluded.next,commands=excluded.commands,failures=excluded.failures,actor_id=excluded.actor_id,start_commit=excluded.start_commit,end_commit=excluded.end_commit,updated_at=excluded.updated_at",
+	_, err = t.query("INSERT INTO checkpoints("+checkpointColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_table,id) DO UPDATE SET summary=excluded.summary,completed=excluded.completed,next=excluded.next,commands=excluded.commands,failures=excluded.failures,actor_id=excluded.actor_id,start_commit=excluded.start_commit,end_commit=excluded.end_commit,updated_at=excluded.updated_at",
 		c.ID, name, c.Summary, completed, next, commands, failures, c.ActorID, c.StartCommit, c.EndCommit, stamp(c.CreatedAt), stamp(c.UpdatedAt))
 	if err != nil {
 		return err

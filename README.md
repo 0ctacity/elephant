@@ -272,6 +272,16 @@ Recall returns up to 50 tasks **per unfinished status** (active, blocked, open),
 
 Titles are limited to 300 bytes and bodies to 32 KiB. Each mutation accepts up to 99 file/entry links, with up to 100 outgoing links per entry including supersession. These limits keep retrieval bounded.
 
+## Portable export, import, and backups
+
+```sh
+elephant export --project > project-memory.json
+elephant import project-memory.json --as-remote archive
+elephant backup --output elephant-backup.zova
+```
+
+Export writes a deterministic versioned JSON envelope (format_version 1) with global entry IDs, actor IDs, lifecycle fields, relationships, and source project metadata; entries sort by ID and relations by from/type/to. Import validates IDs, kinds, statuses, paths, and relationships before committing anything, stores the result in a separate `import:NAME` source table so local truth is never overwritten, and is idempotent on reimport. Unknown format versions fail explicitly. Backup uses a storage-safe snapshot while the database stays open. MCP adds `export_project` and `import_project`.
+
 ## Development
 
 With the native build flags set as above:

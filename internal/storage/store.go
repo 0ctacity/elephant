@@ -10,6 +10,7 @@ import (
 // Store serializes a complete operation in a transaction, including graph edits.
 type Store interface {
 	Transact(context.Context, func(Tx) error) error
+	Backup(string) error
 }
 type Tx interface {
 	Identity() (string, error)
