@@ -94,7 +94,7 @@ elephant setup codex
 elephant setup opencode
 ```
 
-Codex uses `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, and receives a `[mcp_servers.elephant]` table plus an `[mcp_servers.elephant.env]` table. OpenCode uses `$OPENCODE_CONFIG` or `$XDG_CONFIG_HOME/opencode/opencode.json`, defaulting to `~/.config/opencode/opencode.json`, and receives a `mcp.elephant` object with `"type": "local"`. Both entries launch the resolved executable as `elephant --db /path/to/elephant.zova serve` and set an explicit `ELEPHANT_ACTOR_ID` so entries carry provenance.
+Codex uses `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, and receives a `[mcp_servers.elephant]` table plus an `[mcp_servers.elephant.env]` table. OpenCode uses `$OPENCODE_CONFIG` or `$XDG_CONFIG_HOME/opencode/opencode.json`, defaulting to `~/.config/opencode/opencode.json`, and receives a `mcp.servers.elephant` object with `"type": "local"` (an older `mcp.elephant` entry is migrated forward). Both entries launch the resolved executable as `elephant --db /path/to/elephant.zova serve` and set an explicit `ELEPHANT_ACTOR_ID` so entries carry provenance. Writes go through a synced temporary file plus atomic rename, so an interrupted setup never leaves a truncated configuration.
 
 Setup edits only Elephant's own entry and preserves every other setting. It is idempotent: running it again with the same command and actor writes nothing. Pass `--actor ID` to choose the identity, or `--config FILE` to write a specific configuration file. Unsupported agents are not modified; the command prints a copy-ready example instead.
 

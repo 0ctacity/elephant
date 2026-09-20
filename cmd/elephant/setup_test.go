@@ -59,10 +59,24 @@ func TestSetupWritesAgentConfigurationInTemporaryHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"type": "local"`, escapedDatabase, `"ELEPHANT_ACTOR_ID"`} {
+	for _, want := range []string{`"type": "local"`, `"servers"`, escapedDatabase, `"ELEPHANT_ACTOR_ID"`} {
 		if !strings.Contains(string(opencodeContent), want) {
 			t.Fatalf("opencode configuration missing %q:\n%s", want, opencodeContent)
 		}
+	}
+	if strings.Contains(string(opencodeContent), `"enabled"`) {
+		t.Fatalf("legacy enablement field still present:\n%s", opencodeContent)
+	}
+	out.Reset()
+	if err = run(context.Background(), []string{"setup", "opencode"}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "already up to date") {
+		t.Fatalf("repeated opencode setup: %s", out.String())
+	}
+	repeatedOpencode, err := os.ReadFile(opencodeConfig)
+	if err != nil || !bytes.Equal(repeatedOpencode, opencodeContent) {
+		t.Fatalf("repeated opencode setup rewrote the configuration: %v", err)
 	}
 	out.Reset()
 	if err = run(context.Background(), []string{"setup", "codex"}, &out, &logs); err != nil {

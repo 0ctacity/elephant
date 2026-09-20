@@ -117,8 +117,32 @@ func writeFile(path, content string, existed bool) error {
 			mode = info.Mode().Perm()
 		}
 	}
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+	// Write to a temporary file in the same directory, sync it, then rename
+	// atomically so a crash or write failure never leaves a truncated
+	// configuration behind. The deferred remove only fires when the rename
+	// did not happen.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".elephant-config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("%w: stage configuration write: %v", model.ErrInvalidInput, err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
 		return fmt.Errorf("%w: write %s: %v", model.ErrInvalidInput, path, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("%w: sync %s: %v", model.ErrInvalidInput, path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("%w: close %s: %v", model.ErrInvalidInput, path, err)
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		return fmt.Errorf("%w: protect %s: %v", model.ErrInvalidInput, path, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("%w: replace %s: %v", model.ErrInvalidInput, path, err)
 	}
 	return nil
 }

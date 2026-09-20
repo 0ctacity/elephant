@@ -3,7 +3,6 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
 	"elephant/internal/model"
@@ -18,33 +17,7 @@ func readState(target Target, path, content string, existed bool) (State, error)
 		return state, nil
 	}
 	if target.Format == JSON {
-		doc, err := decodeJSON(content)
-		if err != nil {
-			return state, fmt.Errorf("%w: %s is not valid JSON: %v", model.ErrInvalidInput, path, err)
-		}
-		mcp, ok := doc["mcp"].(map[string]any)
-		if !ok {
-			return state, nil
-		}
-		entry, ok := mcp[ServerName].(map[string]any)
-		if !ok {
-			return state, nil
-		}
-		state.Configured = true
-		state.Detail = "mcp." + ServerName
-		if list, ok := entry["command"].([]any); ok {
-			for _, value := range list {
-				if text, ok := value.(string); ok {
-					state.Command = append(state.Command, text)
-				}
-			}
-		}
-		if environment, ok := entry["environment"].(map[string]any); ok {
-			if actor, ok := environment["ELEPHANT_ACTOR_ID"].(string); ok {
-				state.ActorID = actor
-			}
-		}
-		return state, nil
+		return readOpenCodeState(target, path, content, existed)
 	}
 	if len(tomlBlock(content, "mcp_servers."+ServerName)) == 0 {
 		return state, nil
@@ -60,60 +33,187 @@ func readState(target Target, path, content string, existed bool) (State, error)
 	return state, nil
 }
 
-func decodeJSON(content string) (map[string]any, error) {
-	doc := map[string]any{}
-	decoder := json.NewDecoder(strings.NewReader(content))
-	decoder.UseNumber()
-	if err := decoder.Decode(&doc); err != nil {
-		return nil, err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("expected one JSON document")
-	}
-	return doc, nil
-}
-
 func edit(target Target, content string, command []string, actor string) (string, error) {
 	if target.Format == JSON {
-		return editJSON(content, command, actor)
+		return editOpenCode(content, command, actor)
 	}
 	return setTOMLBlock(content, "mcp_servers."+ServerName, tomlServerBlock(command, actor)), nil
 }
 
-func editJSON(content string, command []string, actor string) (string, error) {
-	doc := map[string]any{}
-	if strings.TrimSpace(content) != "" {
-		parsed, err := decodeJSON(content)
-		if err != nil {
-			return "", fmt.Errorf("%w: existing configuration is not valid JSON (%v); configure it manually", model.ErrInvalidInput, err)
+// openCodePaths locates the current and legacy Elephant server entries.
+// Current OpenCode keeps servers under mcp.servers; older Elephant setups
+// wrote mcp.elephant directly. The legacy entry is read for migration only.
+var openCodeCurrentPath = []string{"mcp", "servers", ServerName}
+var openCodeLegacyPath = []string{"mcp", ServerName}
+
+// openCodeServer is the parsed semantic content of one server entry.
+type openCodeServer struct {
+	command  []string
+	actor    string
+	disabled bool
+}
+
+// parseOpenCodeServer extracts the launch command, actor, and disablement
+// from a decoded server entry, accepting both current and legacy shapes.
+func parseOpenCodeServer(value any) (openCodeServer, bool) {
+	entry, ok := value.(map[string]any)
+	if !ok {
+		return openCodeServer{}, false
+	}
+	var server openCodeServer
+	if list, ok := entry["command"].([]any); ok {
+		for _, item := range list {
+			text, ok := item.(string)
+			if !ok {
+				return openCodeServer{}, false
+			}
+			server.command = append(server.command, text)
 		}
-		doc = parsed
 	}
-	mcp := map[string]any{}
-	if existing, ok := doc["mcp"]; ok {
-		value, ok := existing.(map[string]any)
-		if !ok {
-			return "", fmt.Errorf("%w: the existing \"mcp\" setting is not an object; configure it manually", model.ErrInvalidInput)
+	if environment, ok := entry["environment"].(map[string]any); ok {
+		if actor, ok := environment["ELEPHANT_ACTOR_ID"].(string); ok {
+			server.actor = actor
 		}
-		mcp = value
 	}
-	encoded := make([]any, 0, len(command))
-	for _, value := range command {
-		encoded = append(encoded, value)
+	// Current semantics use opt-in "disabled"; the legacy shape used
+	// opt-out "enabled". A legacy enabled:false migrates to disabled:true.
+	if disabled, ok := entry["disabled"].(bool); ok && disabled {
+		server.disabled = true
+	} else if enabled, ok := entry["enabled"].(bool); ok && !enabled {
+		server.disabled = true
 	}
-	mcp[ServerName] = map[string]any{
-		"type":        "local",
-		"command":     encoded,
-		"enabled":     true,
-		"environment": map[string]string{"ELEPHANT_ACTOR_ID": actor},
+	return server, true
+}
+
+// renderOpenCodeServer encodes the current-format server entry with stable
+// key order so repeated setup produces byte-identical output.
+func renderOpenCodeServer(command []string, actor string, disabled bool) (string, error) {
+	entry := struct {
+		Type        string            `json:"type"`
+		Command     []string          `json:"command"`
+		Environment map[string]string `json:"environment"`
+		Disabled    *bool             `json:"disabled,omitempty"`
+	}{Type: "local", Command: append([]string{}, command...), Environment: map[string]string{"ELEPHANT_ACTOR_ID": actor}}
+	if disabled {
+		entry.Disabled = &disabled
 	}
-	doc["mcp"] = mcp
-	updated, err := json.MarshalIndent(doc, "", "  ")
+	encoded, err := json.Marshal(entry)
 	if err != nil {
-		return "", fmt.Errorf("%w: encode configuration: %v", model.ErrInvalidInput, err)
+		return "", fmt.Errorf("%w: encode configuration entry: %v", model.ErrInvalidInput, err)
 	}
-	return string(updated) + "\n", nil
+	return string(encoded), nil
+}
+
+// readOpenCodeState reports the Elephant entry in an OpenCode document,
+// preferring the current path and falling back to the legacy path.
+func readOpenCodeState(target Target, path, content string, existed bool) (State, error) {
+	state := State{Agent: target.Name, ConfigPath: path, Exists: existed}
+	if strings.TrimSpace(content) == "" {
+		return state, nil
+	}
+	current, found, err := readJSONPath(content, openCodeCurrentPath)
+	if err != nil {
+		return state, fmt.Errorf("%w: %s is not valid JSON: %v", model.ErrInvalidInput, path, err)
+	}
+	if found {
+		server, ok := parseOpenCodeServer(current)
+		if !ok {
+			return state, fmt.Errorf("%w: existing %q is not a server entry; configure it manually", model.ErrInvalidInput, "mcp.servers."+ServerName)
+		}
+		state.Configured = true
+		state.Detail = "mcp.servers." + ServerName
+		state.Command = server.command
+		state.ActorID = server.actor
+		return state, nil
+	}
+	legacy, found, err := readJSONPath(content, openCodeLegacyPath)
+	if err != nil {
+		return state, fmt.Errorf("%w: %s is not valid JSON: %v", model.ErrInvalidInput, path, err)
+	}
+	if !found {
+		return state, nil
+	}
+	server, ok := parseOpenCodeServer(legacy)
+	if !ok {
+		return state, nil
+	}
+	state.Configured = true
+	state.Detail = "mcp." + ServerName + " (legacy)"
+	state.Command = server.command
+	state.ActorID = server.actor
+	return state, nil
+}
+
+// editOpenCode writes the current-format server entry with a
+// comment-preserving splice. A legacy entry seeds disablement and is then
+// removed so exactly one Elephant server remains.
+func editOpenCode(content string, command []string, actor string) (string, error) {
+	disabled := false
+	if current, found, err := readJSONPath(content, openCodeCurrentPath); err != nil {
+		return "", err
+	} else if found {
+		server, ok := parseOpenCodeServer(current)
+		if !ok {
+			return "", fmt.Errorf("%w: existing %q is not a server entry; configure it manually", model.ErrInvalidInput, "mcp.servers."+ServerName)
+		}
+		disabled = server.disabled
+	} else if legacy, found, err := readJSONPath(content, openCodeLegacyPath); err != nil {
+		return "", err
+	} else if found {
+		if server, ok := parseOpenCodeServer(legacy); ok {
+			disabled = server.disabled
+		}
+	}
+	rendered, err := renderOpenCodeServer(command, actor, disabled)
+	if err != nil {
+		return "", err
+	}
+	if current, found, err := readJSONPath(content, openCodeCurrentPath); err != nil {
+		return "", err
+	} else if found {
+		server, ok := parseOpenCodeServer(current)
+		if !ok {
+			return "", fmt.Errorf("%w: existing %q is not a server entry; configure it manually", model.ErrInvalidInput, "mcp.servers."+ServerName)
+		}
+		if equalStringSlices(server.command, command) && server.actor == actor && server.disabled == disabled {
+			return content, nil
+		}
+	}
+	updated, err := setJSONPath(content, openCodeCurrentPath, rendered)
+	if err != nil {
+		return "", err
+	}
+	// Migrate the legacy entry away only when it parses as a server entry;
+	// anything else is left for the user.
+	if legacy, found, err := readJSONPath(content, openCodeLegacyPath); err != nil {
+		return "", err
+	} else if found {
+		if _, ok := parseOpenCodeServer(legacy); ok {
+			mcpObj, mcpFound, err := walkJSONPath(updated, []string{"mcp"})
+			if err != nil {
+				return "", err
+			}
+			if mcpFound {
+				updated, _, err = removeJSONMember(updated, mcpObj, ServerName)
+				if err != nil {
+					return "", err
+				}
+			}
+		}
+	}
+	return updated, nil
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Manual returns a copy-ready configuration example for an agent Elephant does

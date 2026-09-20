@@ -14,6 +14,27 @@ import (
 	"elephant/internal/storage/zova"
 )
 
+// assertToolSet requires every named tool to be advertised exactly once. It
+// replaces brittle exact-count assertions so stacked features compose without
+// rewriting this test on every branch.
+func assertToolSet(t *testing.T, tools *sdk.ListToolsResult, required []string) {
+	t.Helper()
+	seen := map[string]int{}
+	for _, tool := range tools.Tools {
+		seen[tool.Name]++
+	}
+	for name, count := range seen {
+		if count != 1 {
+			t.Fatalf("tool %q advertised %d times", name, count)
+		}
+	}
+	for _, name := range required {
+		if seen[name] != 1 {
+			t.Fatalf("required tool %q missing (have %v)", name, tools.Tools)
+		}
+	}
+}
+
 func TestMCPToolsValidationAndContinuity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -44,9 +65,14 @@ func TestMCPToolsValidationAndContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 22 {
-		t.Fatalf("tools=%d", len(tools.Tools))
-	}
+	assertToolSet(t, tools, []string{
+		"recall_project", "project_status", "inspect_entry",
+		"add_fact", "update_fact", "list_facts", "retire_fact",
+		"add_decision", "update_decision", "list_decisions", "supersede_decision",
+		"add_task", "update_task", "list_tasks", "complete_task", "cancel_task",
+		"list_remotes", "ensure_remote_project",
+		"remote_send_fact", "remote_send_decision", "remote_send_task", "remote_recall",
+	})
 	rr, re := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_remotes", Arguments: map[string]any{}})
 	if re != nil || rr.IsError {
 		t.Fatal(rr, re)
