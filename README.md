@@ -134,7 +134,7 @@ Clients with resources support can read the same bounded state as application-co
 - `elephant://project/current/tasks` — unfinished tasks (active, blocked, open)
 - `elephant://project/current/decisions` — active decisions
 
-The user-controlled `resume_project` prompt (optional `cwd`, `target_version`) returns a bounded resume message plus the full recall JSON, clearly marking stored bodies as project data rather than server instructions. The server attempts the first `file://` MCP root to resolve the repository and falls back to `cwd`/server directory for clients without roots support; existing tools are unchanged.
+The user-controlled `resume_project` prompt (optional `cwd`, `target_version`) returns a bounded resume message plus the full recall JSON, clearly marking stored bodies as project data rather than server instructions. Scope resolution is centralized: an explicit `cwd` wins, then the first usable `file://` MCP root (Unix paths, Windows drive letters, percent encoding, and UNC shares; other schemes are skipped), then the server directory for clients without roots support. The tasks resource is globally newest-first across unfinished statuses with a bounded cap; existing tools are unchanged.
 
 | Purpose | MCP tools |
 | --- | --- |
