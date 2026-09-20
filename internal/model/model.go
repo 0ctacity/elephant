@@ -20,6 +20,7 @@ var (
 	ErrRemote            = errors.New("remote operation failed")
 	ErrStorage           = errors.New("storage operation failed")
 	ErrSchema            = errors.New("incompatible Elephant schema; explicit migration required")
+	ErrDiagnostics       = errors.New("diagnostic checks failed")
 )
 
 type Kind string

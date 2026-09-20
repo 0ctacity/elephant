@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +35,8 @@ const usage = `Elephant — local continuity for coding agents
 Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
 
   serve                 Run the MCP stdio server (also the default command)
+  setup AGENT           Register the MCP server with codex or opencode
+  doctor [--json]       Diagnose executable, database, Git, MCP, actor, remotes
   recall                Show saved project context and unfinished work
   identity              Show this installation’s stable Elephant ID
   remote                Manage peers, ensure projects, send entries, or fetch state
@@ -47,6 +48,8 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
   --version             Print version
 
 Use recall --remote NAME_OR_UUID for a locally stored remote source table.
+setup accepts --actor ID and --config FILE; unsupported agents print an example.
+doctor prints text by default and structured JSON with --json.
 ELEPHANT_ACTOR_ID identifies the actor creating rows (default: unknown).
 ELEPHANT_DB overrides the default database path.
 ELEPHANT_LOG_LEVEL accepts debug, info, warn, or error. Logs go to stderr.
@@ -117,6 +120,12 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 	if len(rest) > 0 {
 		command = rest[0]
 		rest = rest[1:]
+	}
+	switch command {
+	case "setup":
+		return runSetup(ctx, out, logs, rest, *dbPath)
+	case "doctor":
+		return runDoctor(ctx, out, logs, rest, *dbPath)
 	}
 	db, err := zova.Open(*dbPath)
 	if err != nil {
@@ -212,7 +221,5 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 	if err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(result)
+	return writeJSON(out, result)
 }
