@@ -6,16 +6,23 @@ import (
 	"time"
 )
 
+// Checkpoint list bounds keep session boundaries concise and bounded.
+const (
+	MaxCheckpointItems    = 50
+	MaxCheckpointItemSize = 2000
+)
+
 // Checkpoint marks a concise boundary between coding sessions: what changed,
-// what was tried, and where the next agent should resume.
+// what was tried, and where the next agent should resume. Completed work,
+// next actions, commands, and failures are ordered lists.
 type Checkpoint struct {
 	ID          string    `json:"id"`
 	ActorID     string    `json:"actor_id"`
 	Summary     string    `json:"summary"`
-	Completed   string    `json:"completed,omitempty"`
-	Next        string    `json:"next,omitempty"`
-	Commands    string    `json:"commands,omitempty"`
-	Failures    string    `json:"failures,omitempty"`
+	Completed   []string  `json:"completed,omitempty"`
+	Next        []string  `json:"next,omitempty"`
+	Commands    []string  `json:"commands,omitempty"`
+	Failures    []string  `json:"failures,omitempty"`
 	StartCommit *string   `json:"start_commit"`
 	EndCommit   *string   `json:"end_commit"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -27,13 +34,18 @@ func (c Checkpoint) Validate() error {
 		return fmt.Errorf("%w: summary (1-2000 bytes) required", ErrInvalidInput)
 	}
 	for _, v := range []struct {
-		name  string
-		value string
+		name   string
+		values []string
 	}{
 		{"completed", c.Completed}, {"next", c.Next}, {"commands", c.Commands}, {"failures", c.Failures},
 	} {
-		if len(v.value) > 32768 || strings.ContainsRune(v.value, 0) {
-			return fmt.Errorf("%w: checkpoint %s must be at most 32768 bytes", ErrInvalidInput, v.name)
+		if len(v.values) > MaxCheckpointItems {
+			return fmt.Errorf("%w: checkpoint %s accepts at most %d items", ErrInvalidInput, v.name, MaxCheckpointItems)
+		}
+		for _, item := range v.values {
+			if strings.TrimSpace(item) == "" || len(item) > MaxCheckpointItemSize || strings.ContainsRune(item, 0) {
+				return fmt.Errorf("%w: checkpoint %s items must be 1-%d bytes without NUL", ErrInvalidInput, v.name, MaxCheckpointItemSize)
+			}
 		}
 	}
 	if c.CreatedAt.IsZero() || c.UpdatedAt.Before(c.CreatedAt) {
@@ -47,6 +59,7 @@ func (c Checkpoint) Validate() error {
 	return nil
 }
 
-// CheckpointNode scopes a checkpoint in the shared graph. Checkpoints use a
-// distinct prefix so they never collide with entry: or file: nodes.
-func CheckpointNode(id string) string { return "checkpoint:" + id }
+// CheckpointNode scopes a checkpoint in the shared graph by owning project
+// table, so identical checkpoint IDs in different source tables never share
+// a node. The distinct prefix keeps checkpoints clear of entry: and file:.
+func CheckpointNode(table, id string) string { return "checkpoint:" + table + ":" + id }

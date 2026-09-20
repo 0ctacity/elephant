@@ -18,12 +18,12 @@ func runCheckpoint(ctx context.Context, s *app.Service, cwd string, args []strin
 	f := flag.NewFlagSet("checkpoint", flag.ContinueOnError)
 	f.SetOutput(logs)
 	summary := f.String("summary", "", "session summary (required)")
-	completed := f.String("completed", "", "completed work")
-	next := f.String("next", "", "next actions")
-	commands := f.String("commands", "", "commands or checks run")
-	failures := f.String("failures", "", "unresolved failures")
 	start := f.String("start-commit", "", "starting commit (defaults to previous checkpoint end)")
-	var files, relations fileFlags
+	var completed, next, commands, failures, files, relations fileFlags
+	f.Var(&completed, "completed", "completed work item; repeatable")
+	f.Var(&next, "next", "next action; repeatable")
+	f.Var(&commands, "commands", "command or check run; repeatable")
+	f.Var(&failures, "failures", "unresolved failure; repeatable")
 	f.Var(&files, "file", "related repository-relative file; repeatable")
 	f.Var(&relations, "relation", "TYPE:ENTRY_UUID; repeatable")
 	if err := f.Parse(args); err != nil {
@@ -32,7 +32,7 @@ func runCheckpoint(ctx context.Context, s *app.Service, cwd string, args []strin
 	if f.NArg() != 0 {
 		return nil, model.ErrInvalidInput
 	}
-	in := app.CheckpointInput{Summary: *summary, Completed: *completed, Next: *next, Commands: *commands, Failures: *failures, StartCommit: *start, RelatedFiles: files}
+	in := app.CheckpointInput{Summary: *summary, Completed: completed, Next: next, Commands: commands, Failures: failures, StartCommit: *start, RelatedFiles: files}
 	for _, raw := range relations {
 		typ, id, ok := strings.Cut(raw, ":")
 		if !ok || typ == "" || id == "" {

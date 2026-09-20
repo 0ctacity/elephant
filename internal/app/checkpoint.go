@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,16 +13,19 @@ import (
 	"elephant/internal/storage"
 )
 
-// CheckpointInput creates one session boundary. RelatedFiles are
-// repository-relative paths; Relations link to existing entries in the same
-// project. StartCommit defaults to the previous checkpoint's end commit when
-// present, otherwise to the current HEAD.
+// CheckpointInput creates one session boundary. Completed work, next
+// actions, commands, and failures are ordered lists with bounded sizes.
+// RelatedFiles are repository-relative paths; Relations link to existing
+// entries in the same project. StartCommit defaults to the previous
+// checkpoint's end commit when present, otherwise to the current HEAD; an
+// explicitly supplied start commit is verified with Git and rejected when
+// unknown.
 type CheckpointInput struct {
 	Summary      string          `json:"summary"`
-	Completed    string          `json:"completed,omitempty"`
-	Next         string          `json:"next,omitempty"`
-	Commands     string          `json:"commands,omitempty"`
-	Failures     string          `json:"failures,omitempty"`
+	Completed    []string        `json:"completed,omitempty"`
+	Next         []string        `json:"next,omitempty"`
+	Commands     []string        `json:"commands,omitempty"`
+	Failures     []string        `json:"failures,omitempty"`
 	StartCommit  string          `json:"start_commit,omitempty"`
 	RelatedFiles []string        `json:"related_files,omitempty"`
 	Relations    []RelationInput `json:"relations,omitempty"`
@@ -54,6 +58,14 @@ func (s *Service) AddCheckpoint(ctx context.Context, cwd string, in CheckpointIn
 			} else {
 				start = g.Head
 			}
+		} else if err = gitrepo.VerifyCommit(ctx, g.Root, start); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, gitrepo.ErrUnknownCommit) {
+				return fmt.Errorf("%w: unknown start commit %q", model.ErrInvalidInput, start)
+			}
+			return err
 		}
 		c := model.Checkpoint{
 			ID: id.String(), ActorID: currentActor(), Summary: in.Summary,
@@ -67,7 +79,7 @@ func (s *Service) AddCheckpoint(ctx context.Context, cwd string, in CheckpointIn
 		if err = tx.PutCheckpoint(p, c); err != nil {
 			return err
 		}
-		node := model.CheckpointNode(c.ID)
+		node := model.CheckpointNode(p.TableName, c.ID)
 		for _, f := range in.RelatedFiles {
 			clean, err := model.CleanFile(f)
 			if err != nil {

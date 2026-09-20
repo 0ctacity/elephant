@@ -70,7 +70,7 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 				return t.migrate()
 			}
 			rows, err := t.query("SELECT value FROM elephant_meta WHERE key='schema_version'")
-			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2" && value(rows[0][0]) != "3") {
+			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2" && value(rows[0][0]) != "3" && value(rows[0][0]) != "4") {
 				return model.ErrSchema
 			}
 			has, err := db.HasGraph(graph)
@@ -84,7 +84,12 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 			case "1":
 				return t.migrate()
 			case "2":
-				return t.migrateEvidence()
+				if err := t.migrateEvidence(); err != nil {
+					return err
+				}
+				return t.migrateCheckpoints()
+			case "3":
+				return t.migrateCheckpoints()
 			}
 			return nil
 		})

@@ -149,8 +149,8 @@ CREATE INDEX ` + tableName + `_version ON ` + tableName + `(target_version);`)
 				if err != nil {
 					return err
 				}
-				if len(rows) != 1 || value(rows[0][0]) != "3" {
-					return fmt.Errorf("migration did not persist schema 3")
+				if len(rows) != 1 || value(rows[0][0]) != "4" {
+					return fmt.Errorf("migration did not persist schema 4")
 				}
 				rows, err = tx.(*transaction).query("SELECT id FROM project_tables")
 				if err != nil {
