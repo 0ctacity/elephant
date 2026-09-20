@@ -61,11 +61,32 @@ func resolveExecutable(exe string) (string, error) {
 	if strings.TrimSpace(exe) == "" {
 		return "", fmt.Errorf("%w: Elephant executable path is required", model.ErrInvalidInput)
 	}
-	abs, err := filepath.Abs(exe)
+	return resolvePath(exe, "Elephant executable")
+}
+
+// resolvePath absolutizes relative paths while preserving already-absolute
+// paths verbatim. Unix-absolute paths are kept as-is even on Windows, where
+// filepath would otherwise rewrite them against the current drive and corrupt
+// the configured launch command.
+func resolvePath(value, what string) (string, error) {
+	value = strings.TrimSpace(value)
+	if isAbsolutePath(value) {
+		return value, nil
+	}
+	abs, err := filepath.Abs(value)
 	if err != nil {
-		return "", fmt.Errorf("%w: resolve Elephant executable: %v", model.ErrInvalidInput, err)
+		return "", fmt.Errorf("%w: resolve %s: %v", model.ErrInvalidInput, what, err)
 	}
 	return abs, nil
+}
+
+// isAbsolutePath reports absolute paths in the host convention as well as the
+// Unix convention, so configuration round-trips byte-identically on Windows.
+func isAbsolutePath(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	return strings.HasPrefix(p, "/")
 }
 
 func validateActor(actor string) error {
@@ -121,8 +142,8 @@ func Configure(in Input, env Env) (Result, error) {
 	}
 	database := strings.TrimSpace(in.Database)
 	if database != "" {
-		if database, err = filepath.Abs(database); err != nil {
-			return out, fmt.Errorf("%w: resolve database path: %v", model.ErrInvalidInput, err)
+		if database, err = resolvePath(database, "database path"); err != nil {
+			return out, err
 		}
 	}
 	target, err := Lookup(name)
@@ -141,8 +162,8 @@ func Configure(in Input, env Env) (Result, error) {
 			return out, err
 		}
 	}
-	if path, err = filepath.Abs(path); err != nil {
-		return out, fmt.Errorf("%w: resolve configuration path: %v", model.ErrInvalidInput, err)
+	if path, err = resolvePath(path, "configuration path"); err != nil {
+		return out, err
 	}
 	content, existed, err := readFile(path)
 	if err != nil {

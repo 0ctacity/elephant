@@ -47,7 +47,10 @@ func TestSetupWritesAgentConfigurationInTemporaryHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"--db", database, "serve", "ELEPHANT_ACTOR_ID"} {
+	// TOML basic strings and JSON both escape backslashes, so a Windows
+	// database path appears doubled in the configuration file.
+	escapedDatabase := strings.ReplaceAll(database, `\`, `\\`)
+	for _, want := range []string{"--db", escapedDatabase, "serve", "ELEPHANT_ACTOR_ID"} {
 		if !strings.Contains(string(codexContent), want) {
 			t.Fatalf("codex configuration missing %q:\n%s", want, codexContent)
 		}
@@ -56,7 +59,7 @@ func TestSetupWritesAgentConfigurationInTemporaryHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"type": "local"`, database, `"ELEPHANT_ACTOR_ID"`} {
+	for _, want := range []string{`"type": "local"`, escapedDatabase, `"ELEPHANT_ACTOR_ID"`} {
 		if !strings.Contains(string(opencodeContent), want) {
 			t.Fatalf("opencode configuration missing %q:\n%s", want, opencodeContent)
 		}
