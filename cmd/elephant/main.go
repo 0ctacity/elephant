@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -56,6 +57,11 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
   export [--project]    Write versioned project JSON to stdout
   import FILE [--as-remote NAME]  Load an export into a separate source table
   backup --output FILE.zova  Write a consistent database snapshot
+  search [QUERY] [--kind KIND] [--status STATUS] [--actor ACTOR]
+         [--target-version V] [--commit C] [--commit-start C] [--commit-end C]
+         [--updated-after RFC3339] [--updated-before RFC3339] [--file PATH] [--remote SRC]
+  related ENTRY_ID [--direction both|outgoing|incoming] [--edge TYPE] [--depth N]
+  history PATH [--limit N]
   add fact|decision|task --title TEXT --body TEXT [--target-version TEXT] [--file PATH ...]
   remote send fact --title TEXT --body TEXT [--evidence EVIDENCE_ID ...]
                    [--file PATH ...] [--relation TYPE:ENTRY_UUID ...]
@@ -307,6 +313,73 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 			return fmt.Errorf("%w: backup destination must end in .zova", model.ErrInvalidInput)
 		}
 		result, err = map[string]string{"backup": *output}, service.Backup(ctx, *output)
+	case "search":
+		f := flag.NewFlagSet("search", flag.ContinueOnError)
+		f.SetOutput(logs)
+		kind := f.String("kind", "", "fact, decision, or task")
+		status := f.String("status", "", "status filter")
+		actor := f.String("actor", "", "actor ID filter")
+		version := f.String("target-version", "", "version filter")
+		commit := f.String("commit", "", "entries active at this commit (single-commit range)")
+		commitStart := f.String("commit-start", "", "inclusive range start; must precede --commit-end")
+		commitEnd := f.String("commit-end", "", "inclusive range end; must follow --commit-start")
+		updatedAfter := f.String("updated-after", "", "updated_at >= RFC3339 time (e.g. 2026-09-01T00:00:00Z)")
+		updatedBefore := f.String("updated-before", "", "updated_at <= RFC3339 time")
+		file := f.String("file", "", "repository-relative file filter")
+		source := f.String("remote", "", "source Elephant UUID or registered name")
+		limit := f.Int("limit", 20, "maximum results (1-50)")
+		offset := f.Int("offset", 0, "pagination offset")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() > 1 {
+			return fmt.Errorf("%w: search takes at most one query argument", model.ErrInvalidInput)
+		}
+		var after, before *time.Time
+		if *updatedAfter != "" {
+			t, err := time.Parse(time.RFC3339, *updatedAfter)
+			if err != nil {
+				return fmt.Errorf("%w: --updated-after requires RFC3339: %v", model.ErrInvalidInput, err)
+			}
+			after = &t
+		}
+		if *updatedBefore != "" {
+			t, err := time.Parse(time.RFC3339, *updatedBefore)
+			if err != nil {
+				return fmt.Errorf("%w: --updated-before requires RFC3339: %v", model.ErrInvalidInput, err)
+			}
+			before = &t
+		}
+		query := ""
+		if f.NArg() == 1 {
+			query = f.Arg(0)
+		}
+		result, err = service.Search(ctx, *cwd, app.SearchFilters{Query: query, Kind: model.Kind(*kind), Status: *status, Actor: *actor, TargetVersion: *version, Commit: *commit, CommitStart: *commitStart, CommitEnd: *commitEnd, File: *file, Source: *source, UpdatedAfter: after, UpdatedBefore: before, Limit: *limit, Offset: *offset})
+	case "related":
+		f := flag.NewFlagSet("related", flag.ContinueOnError)
+		f.SetOutput(logs)
+		direction := f.String("direction", "both", "outgoing, incoming, or both")
+		edge := f.String("edge", "", "edge type filter")
+		depth := f.Int("depth", 1, "traversal depth (1-3)")
+		limit := f.Int("limit", 20, "maximum results (1-50)")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() != 1 {
+			return fmt.Errorf("%w: related requires one ENTRY_ID", model.ErrInvalidInput)
+		}
+		result, err = service.Related(ctx, *cwd, f.Arg(0), *direction, *edge, *depth, *limit)
+	case "history":
+		f := flag.NewFlagSet("history", flag.ContinueOnError)
+		f.SetOutput(logs)
+		limit := f.Int("limit", 20, "maximum results (1-50)")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() != 1 {
+			return fmt.Errorf("%w: history requires one file path", model.ErrInvalidInput)
+		}
+		result, err = service.History(ctx, *cwd, f.Arg(0), *limit)
 	default:
 		return fmt.Errorf("%w: unknown command %q; use --help", model.ErrInvalidInput, command)
 	}

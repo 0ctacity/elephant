@@ -64,6 +64,8 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore { return &fakeStore{state: newFakeState()} }
 
+func (f *fakeStore) Backup(string) error { return nil }
+
 func (f *fakeStore) Transact(ctx context.Context, fn func(storage.Tx) error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -186,6 +188,93 @@ func (t *fakeTx) Unlink(r model.Relation) error {
 
 func (t *fakeTx) Relations(nodeID string) ([]model.Relation, error) {
 	return append([]model.Relation(nil), t.st.links[nodeID]...), nil
+}
+
+func (t *fakeTx) Incoming(nodeID string) ([]model.Relation, error) {
+	out := []model.Relation{}
+	for from, links := range t.st.links {
+		for _, r := range links {
+			if r.To == nodeID {
+				out = append(out, model.Relation{From: from, Type: r.Type, To: r.To})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		return out[i].From < out[j].From
+	})
+	return out, nil
+}
+
+// Search mirrors the real store's deterministic text retrieval over the fake
+// tables: equality filters plus literal title/body substring, newest first
+// with ID DESC tie-break, bounded by limit.
+func (t *fakeTx) Search(p model.Project, q model.SearchQuery) ([]model.Entry, error) {
+	if q.Kind != "" && q.Kind != model.Fact && q.Kind != model.Decision && q.Kind != model.Task {
+		return nil, model.ErrInvalidKind
+	}
+	if q.Status != "" && !model.ValidStatus(q.Kind, q.Status) {
+		return nil, model.ErrInvalidStatus
+	}
+	limit := q.Limit
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	if q.Offset < 0 {
+		return nil, model.ErrInvalidInput
+	}
+	query := strings.ToLower(strings.TrimSpace(q.Query))
+	m := t.st.entries[p.TableName]
+	out := make([]model.Entry, 0, len(m))
+	for _, e := range m {
+		if q.Kind != "" && e.Kind != q.Kind {
+			continue
+		}
+		if q.Status != "" && e.Status != q.Status {
+			continue
+		}
+		if q.Actor != "" && e.ActorID != q.Actor {
+			continue
+		}
+		if q.TargetVersion != "" && (e.TargetVersion == nil || *e.TargetVersion != q.TargetVersion) {
+			continue
+		}
+		if q.Commit != "" && (e.StartCommit == nil || *e.StartCommit != q.Commit) && (e.EndCommit == nil || *e.EndCommit != q.Commit) {
+			continue
+		}
+		if q.CommitStart != "" && (e.StartCommit == nil || *e.StartCommit != q.CommitStart) {
+			continue
+		}
+		if q.CommitEnd != "" && (e.EndCommit == nil || *e.EndCommit != q.CommitEnd) {
+			continue
+		}
+		if q.UpdatedAfter != nil && e.UpdatedAt.Before(*q.UpdatedAfter) {
+			continue
+		}
+		if q.UpdatedBefore != nil && e.UpdatedAt.After(*q.UpdatedBefore) {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(e.Title), query) && !strings.Contains(strings.ToLower(e.Body), query) {
+			continue
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	if q.Offset >= len(out) {
+		return []model.Entry{}, nil
+	}
+	out = out[q.Offset:]
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (t *fakeTx) PutEvidence(model.Project, model.Evidence) error { return nil }

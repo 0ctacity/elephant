@@ -79,6 +79,7 @@ func TestMCPToolsValidationAndContinuity(t *testing.T) {
 		"add_evidence", "list_evidence", "verify_evidence", "refresh_evidence", "remove_evidence",
 		"add_checkpoint", "list_checkpoints",
 		"export_project", "import_project",
+		"search_entries", "related_entries", "file_history",
 	})
 	rr, re := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_remotes", Arguments: map[string]any{}})
 	if re != nil || rr.IsError {

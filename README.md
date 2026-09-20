@@ -162,6 +162,16 @@ Updates require `id`; omitted fields stay unchanged. `related_files` replaces fi
 
 `supersede_decision` takes the old decision's `id` plus the new `title` and `body`. Alternatively, `add_decision` accepts `supersedes: OLD_ID`. Both atomically create the replacement, close the old decision, and add the graph edge.
 
+## Deterministic search
+
+```sh
+elephant search "shutdown ownership" --kind fact --actor searcher
+elephant related ENTRY_ID --direction both --edge implements --depth 1
+elephant history path/to/file.go --limit 20
+```
+
+Search is project-scoped (use `--remote SRC` for a received table), composes kind/status/actor/version/commit/file/time filters across CLI and MCP, and returns stable ordering with match metadata. Graph traversal is bounded (direction, edge, depth 1–3, limit 1–50) and never crosses project or remote ownership. MCP adds `search_entries`, `related_entries`, and `file_history`.
+
 ## Model and lifecycle
 
 | Entry | Meaning | Statuses |

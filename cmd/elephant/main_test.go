@@ -13,6 +13,7 @@ import (
 
 	"elephant/internal/app"
 	"elephant/internal/model"
+	"elephant/internal/storage/zova"
 	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -222,5 +223,71 @@ func TestReceiveProcessAndRemoteRecall(t *testing.T) {
 	var local app.RecallResult
 	if err := json.Unmarshal(out.Bytes(), &local); err != nil || len(local.Decisions) != 0 {
 		t.Fatal(out.String(), err)
+	}
+}
+
+func TestSearchCLIFilters(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", cwd).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	database := filepath.Join(t.TempDir(), "searchcli.zova")
+	svc := func() *app.Service {
+		db, err := zova.Open(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return app.New(db)
+	}()
+	if _, err := svc.Add(ctx, cwd, model.Fact, app.CreateInput{Title: "Alpha gateway", Body: "cli filters"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Add(ctx, cwd, model.Decision, app.CreateInput{Title: "Beta gateway", Body: "cli filters"}); err != nil {
+		t.Fatal(err)
+	}
+	var out, logs bytes.Buffer
+	runOK := func(args []string) string {
+		out.Reset()
+		if err := run(ctx, args, &out, &logs); err != nil {
+			t.Fatalf("%v: %v %s", args, err, logs.String())
+		}
+		return out.String()
+	}
+	q := func(extra ...string) []string {
+		args := append([]string{"--db", database, "--cwd", cwd, "search", "--limit", "50"}, extra...)
+		return append(args, "gateway")
+	}
+	var all []struct {
+		Entry struct {
+			ID        string `json:"id"`
+			UpdatedAt string `json:"updated_at"`
+		} `json:"entry"`
+		Match []string `json:"match"`
+	}
+	if err := json.Unmarshal([]byte(runOK(q())), &all); err != nil || len(all) != 2 {
+		t.Fatalf("search: %d %v %s", len(all), err, out.String())
+	}
+	// Time filters compose with the text query.
+	betaStamp := strings.Replace(all[0].Entry.UpdatedAt, "+0000", "Z", 1)
+	alphaStamp := strings.Replace(all[1].Entry.UpdatedAt, "+0000", "Z", 1)
+	var newer []map[string]any
+	if err := json.Unmarshal([]byte(runOK(q("--updated-after", betaStamp))), &newer); err != nil || len(newer) != 1 {
+		t.Fatalf("updated-after: %d %v %s", len(newer), err, out.String())
+	}
+	var older []map[string]any
+	if err := json.Unmarshal([]byte(runOK(q("--updated-before", alphaStamp))), &older); err != nil || len(older) != 1 {
+		t.Fatalf("updated-before: %d %v %s", len(older), err, out.String())
+	}
+	// Kind and status filters still compose.
+	var onlyFacts []map[string]any
+	if err := json.Unmarshal([]byte(runOK(q("--kind", "fact"))), &onlyFacts); err != nil || len(onlyFacts) != 1 {
+		t.Fatalf("kind: %d %v %s", len(onlyFacts), err, out.String())
+	}
+	// Invalid RFC3339 is rejected as invalid input, not a server error.
+	out.Reset()
+	if err := run(ctx, q("--updated-after", "yesterday"), &out, &logs); err == nil {
+		t.Fatal("invalid time accepted")
 	}
 }
