@@ -80,6 +80,7 @@ func New(service *app.Service, defaultCWD string) *sdk.Server {
 		return in
 	}
 	registerRemotes(s, service, cwd)
+	registerResources(s, service, defaultCWD)
 	register(s, "recall_project", "Get bounded active project knowledge, unfinished work, recent history, file relations, and current Git state.", func(ctx context.Context, in recallInput) (app.RecallResult, error) {
 		return service.Recall(ctx, cwd(in.CWD), in.TargetVersion)
 	})
