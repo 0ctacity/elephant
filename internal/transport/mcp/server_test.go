@@ -15,7 +15,10 @@ import (
 )
 
 func TestMCPToolsValidationAndContinuity(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The budget covers process startup, database open, and several
+	// sequential tool calls; Windows CI runners are significantly slower,
+	// so allow a full minute instead of failing on general slowness.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cwd := t.TempDir()
 	cmd := exec.Command("git", "init", "-q", cwd)
