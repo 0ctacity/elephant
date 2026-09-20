@@ -309,3 +309,12 @@ The boundaries are `internal/model` (records and validation), `internal/app` (wo
 Logs use `slog` on stderr. Set `ELEPHANT_LOG_LEVEL=debug` for underlying diagnostics; normal tool errors omit native database details. Stdout is reserved for MCP traffic when serving.
 
 V1 has no internal LLM, vectors, repository index, conversation ingestion, cloud sync, UI, or automatic stale detection. Facts become stale through explicit updates.
+
+## Memory health review
+
+```sh
+elephant review
+elephant review --json
+```
+
+Review is deterministic and read-only. It reports stable codes (`MISSING_FILE`, `STALE_TASK`, `UNVERIFIED_FACT`, `DANGLING_RELATION`, `SUPERSESSION_ANOMALY`, `UNKNOWN_ACTOR`, `STALE_REMOTE`), severity, source-separated entry context, and an explicit suggested action. Thresholds default to 30/90/30 days with bounded `--stale-task-days`, `--unverified-fact-days`, and `--stale-remote-days` flags. Unavailable information (remote file references, unregistered peers) is distinguished from confirmed inconsistency. MCP adds `review_memory`.

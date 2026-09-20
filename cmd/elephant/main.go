@@ -62,6 +62,8 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
          [--updated-after RFC3339] [--updated-before RFC3339] [--file PATH] [--remote SRC]
   related ENTRY_ID [--direction both|outgoing|incoming] [--edge TYPE] [--depth N]
   history PATH [--limit N]
+  review [--json] [--stale-task-days N] [--unverified-fact-days N]
+         [--stale-remote-days N]  Deterministic read-only memory health review
   add fact|decision|task --title TEXT --body TEXT [--target-version TEXT] [--file PATH ...]
   remote send fact --title TEXT --body TEXT [--evidence EVIDENCE_ID ...]
                    [--file PATH ...] [--relation TYPE:ENTRY_UUID ...]
@@ -80,6 +82,7 @@ the receiver re-verifies it against its own checkout on recall.
 recall includes the latest checkpoint before older project context.
 Export output is deterministic for unchanged state; import validates fully
 before committing and never overwrites local truth.
+Review is read-only and deterministic; thresholds default to 30/90/30 days.
 ELEPHANT_ACTOR_ID identifies the actor creating rows (default: unknown).
 ELEPHANT_DB overrides the default database path.
 ELEPHANT_LOG_LEVEL accepts debug, info, warn, or error. Logs go to stderr.
@@ -380,6 +383,28 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 			return fmt.Errorf("%w: history requires one file path", model.ErrInvalidInput)
 		}
 		result, err = service.History(ctx, *cwd, f.Arg(0), *limit)
+	case "review":
+		f := flag.NewFlagSet("review", flag.ContinueOnError)
+		f.SetOutput(logs)
+		asJSON := f.Bool("json", false, "machine-readable JSON output")
+		staleTask := f.Int("stale-task-days", 30, "days before an open task is stale (1-3650)")
+		unverifiedFact := f.Int("unverified-fact-days", 90, "days before a fact needs verification (1-3650)")
+		staleRemote := f.Int("stale-remote-days", 30, "days before a remote is stale (1-3650)")
+		if err = f.Parse(rest); err != nil {
+			return err
+		}
+		if f.NArg() != 0 {
+			return fmt.Errorf("%w: review takes no positional arguments", model.ErrInvalidInput)
+		}
+		findings, reviewErr := service.Review(ctx, *cwd, &app.ReviewOptions{StaleTaskDays: *staleTask, UnverifiedFactDays: *unverifiedFact, StaleRemoteDays: *staleRemote})
+		if reviewErr != nil {
+			return reviewErr
+		}
+		if !*asJSON {
+			printReviewHuman(out, findings)
+			return nil
+		}
+		result = findings
 	default:
 		return fmt.Errorf("%w: unknown command %q; use --help", model.ErrInvalidInput, command)
 	}
