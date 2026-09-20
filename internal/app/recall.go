@@ -14,17 +14,21 @@ type RecallResult struct {
 	Tasks            []model.Entry    `json:"tasks"`
 	Decisions        []model.Entry    `json:"decisions"`
 	Facts            []model.Entry    `json:"facts"`
+	Evidence         []EvidenceView   `json:"evidence"`
 	RecentCompleted  []model.Entry    `json:"recent_completed_tasks"`
 	RecentSuperseded []model.Entry    `json:"recent_superseded_decisions"`
 	Relations        []model.Relation `json:"relations"`
 	Truncated        map[string]bool  `json:"truncated"`
 }
 
+// recallEvidenceLimit bounds verification work in one recall.
+const recallEvidenceLimit = 50
+
 func (s *Service) Recall(ctx context.Context, cwd, version string) (out RecallResult, err error) {
 	return s.recallWith(ctx, version, func(fn func(storage.Tx, model.Project, gitrepo.Metadata) error) error { return s.within(ctx, cwd, fn) })
 }
 func (s *Service) recallWith(ctx context.Context, version string, within func(func(storage.Tx, model.Project, gitrepo.Metadata) error) error) (out RecallResult, err error) {
-	out = RecallResult{Tasks: []model.Entry{}, Decisions: []model.Entry{}, Facts: []model.Entry{}, RecentCompleted: []model.Entry{}, RecentSuperseded: []model.Entry{}, Relations: []model.Relation{}, Truncated: map[string]bool{}}
+	out = RecallResult{Tasks: []model.Entry{}, Decisions: []model.Entry{}, Facts: []model.Entry{}, Evidence: []EvidenceView{}, RecentCompleted: []model.Entry{}, RecentSuperseded: []model.Entry{}, Relations: []model.Relation{}, Truncated: map[string]bool{}}
 	err = within(func(tx storage.Tx, p model.Project, g gitrepo.Metadata) error {
 		out.Project = p
 		out.Git = g
@@ -54,6 +58,26 @@ func (s *Service) recallWith(ctx context.Context, version string, within func(fu
 					return err
 				}
 				out.Relations = append(out.Relations, links...)
+			}
+		}
+		for _, fact := range out.Facts {
+			stored, err := tx.Evidence(p, fact.ID)
+			if err != nil {
+				return err
+			}
+			for _, evidence := range stored {
+				if len(out.Evidence) >= recallEvidenceLimit {
+					out.Truncated["evidence"] = true
+					break
+				}
+				view, err := verifyEvidence(ctx, g.Root, evidence)
+				if err != nil {
+					return err
+				}
+				out.Evidence = append(out.Evidence, view)
+			}
+			if out.Truncated["evidence"] {
+				break
 			}
 		}
 		return nil

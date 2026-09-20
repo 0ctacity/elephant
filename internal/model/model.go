@@ -17,6 +17,7 @@ var (
 	ErrInvalidTransition = errors.New("invalid lifecycle transition")
 	ErrInvalidInput      = errors.New("invalid input")
 	ErrRelationNotFound  = errors.New("relation not found")
+	ErrEvidenceNotFound  = errors.New("evidence not found")
 	ErrRemote            = errors.New("remote operation failed")
 	ErrStorage           = errors.New("storage operation failed")
 	ErrSchema            = errors.New("incompatible Elephant schema; explicit migration required")

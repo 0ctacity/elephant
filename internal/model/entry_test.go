@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestEntryValidationAndLifecycle(t *testing.T) {
@@ -34,6 +35,52 @@ func TestEntryValidationAndLifecycle(t *testing.T) {
 	}
 	if err := ValidateTransition(Fact, "stale", "active"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEvidenceValidation(t *testing.T) {
+	now := time.Now().UTC()
+	valid := Evidence{ID: "evidence-one", EntryID: "fact-one", Path: "src/main.go", Line: 12, Commit: "abc123", Blob: "deadbeef", CreatedAt: now, VerifiedAt: now}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	blank := valid
+	blank.Line = 0
+	if err := blank.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Evidence){
+		"missing ID":     func(e *Evidence) { e.ID = "" },
+		"missing entry":  func(e *Evidence) { e.EntryID = "" },
+		"absolute path":  func(e *Evidence) { e.Path = "/etc/passwd" },
+		"traversal":      func(e *Evidence) { e.Path = "../secret" },
+		"negative line":  func(e *Evidence) { e.Line = -1 },
+		"large line":     func(e *Evidence) { e.Line = 1_000_001 },
+		"spaced commit":  func(e *Evidence) { e.Commit = "abc 123" },
+		"zero created":   func(e *Evidence) { e.CreatedAt = time.Time{} },
+		"early verified": func(e *Evidence) { e.VerifiedAt = now.Add(-time.Hour) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := valid
+			mutate(&e)
+			if e.Validate() == nil {
+				t.Fatal("accepted invalid evidence")
+			}
+		})
+	}
+	if _, err := CleanEvidenceLine(-1); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("negative line: %v", err)
+	}
+	if _, err := CleanEvidenceLine(0); err != nil {
+		t.Fatalf("zero line: %v", err)
+	}
+	for _, state := range []string{EvidenceUnchanged, EvidenceChanged, EvidenceMissing, EvidenceUnavailable} {
+		if !ValidEvidenceState(state) {
+			t.Fatalf("rejected state %q", state)
+		}
+	}
+	if ValidEvidenceState("retired") {
+		t.Fatal("accepted unknown state")
 	}
 }
 

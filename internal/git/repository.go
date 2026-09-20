@@ -92,6 +92,31 @@ func Inspect(ctx context.Context, cwd string) (Metadata, error) {
 	}, nil
 }
 
+// ErrNotRegularFile reports that an evidence path is not a regular file, so its
+// content cannot be compared deterministically.
+var ErrNotRegularFile = errors.New("not a regular file")
+
+// FileBlob returns the Git blob hash of a working-tree file. A caller-provided
+// repository-relative path is resolved against root; a missing file returns an
+// error wrapping os.ErrNotExist.
+func FileBlob(ctx context.Context, root, path string) (string, error) {
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(path)))
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%w: %s", ErrNotRegularFile, path)
+	}
+	hash, err := runGit(ctx, root, "hash-object", "--", path)
+	if err != nil {
+		return "", err
+	}
+	if len(hash) != 40 && len(hash) != 64 || strings.ContainsAny(hash, " \t") {
+		return "", errors.New("unexpected Git blob hash")
+	}
+	return hash, nil
+}
+
 // NormalizeRemote returns the canonical host/path identity for a Git remote.
 // It accepts SSH scp syntax and URL forms. User information, query strings,
 // and fragments are omitted so credentials cannot become part of an identity.

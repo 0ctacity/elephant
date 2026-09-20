@@ -179,6 +179,26 @@ Files are normalized repository-relative paths. File graph nodes include project
 
 Entry links must stay within one project. Dependencies are explicit links; Elephant does not schedule tasks or infer dependency completion.
 
+## Source evidence
+
+Facts can carry verifiable source evidence: a pointer to a repository file (and optional line) pinned to the commit and blob hash where it was captured. Evidence attaches only to facts. Verification is deterministic — Elephant re-reads the file from the working tree or the pinned commit and compares the blob hash, so it needs no network access and never guesses.
+
+CLI:
+
+```sh
+elephant evidence add FACT_ID --file internal/runtime/worker.go --line 42
+elephant evidence list FACT_ID
+elephant evidence verify FACT_ID              # read-only; never mutates rows or fact status
+elephant evidence refresh FACT_ID [--evidence EVIDENCE_ID]   # re-pin to current HEAD
+elephant evidence remove EVIDENCE_ID
+```
+
+Each row reports one of four states: **verified** (blob hash matches the current content), **changed** (the file exists but its content differs from the pinned blob), **missing** (the path no longer exists), or **unavailable** (no local checkout or Git metadata to check against). Verification never mutates rows or retires a fact — a changed source is reported, not acted on. `refresh` re-pins rows to the current HEAD commit and blob. Up to 50 evidence locations are accepted per fact.
+
+Recall includes a bounded evidence section for active facts (limit 50) with the computed state per row. MCP exposes `add_evidence`, `list_evidence`, `verify_evidence`, `refresh_evidence`, and `remove_evidence`.
+
+Evidence can travel with a fact: `elephant remote send fact --evidence EVIDENCE_ID ...` attaches local evidence rows to the outgoing message. On send, rows are rebound to the new entry ID with fresh IDs and provenance (path, line, commit, blob) preserved; the receiver stores them with the sent entry and re-verifies them against its own checkout on recall, reporting `unavailable` when it has no matching source. Sending is explicit per row — evidence never travels automatically.
+
 ## Sharing state with another Elephant
 
 Each installation keeps its own local truth. Explicit sends create additions in a separate table owned by the sending Elephant on the receiving machine. Normal `recall` never includes those rows. No replication, automatic updates, adoption, or merging occurs.
@@ -202,7 +222,7 @@ elephant recall
 
 Use A's `elephant identity` result as `SOURCE_ELEPHANT_UUID`. A stable UUIDv7 identity is stored in each `elephant.zova`; restarts preserve it. A separate database has a separate identity, and copying the database copies its identity. Table ownership uses this Elephant ID. Each row independently records `actor_id`, taken from `ELEPHANT_ACTOR_ID` when creating local or outgoing entries; the default is `unknown`. Configure that environment variable on the MCP server process to identify its actor. Receiving never replaces it with the peer identity.
 
-`remote send` supports `fact`, `decision`, and `task`, plus repeatable `--file PATH`, `--relation TYPE:ENTRY_UUID`, `--target-version VERSION`, and `--supersedes DECISION_UUID`. Responses include the new `entry_id`. Entry relations must target an existing row in the same source table. Remote `supersedes` records an explicit relationship; it does not update the earlier decision. Absolute paths and traversal are rejected. Missing targets or invalid relationships roll back the complete message, including its receipt and graph edits.
+`remote send` supports `fact`, `decision`, and `task`, plus repeatable `--file PATH`, `--relation TYPE:ENTRY_UUID`, `--evidence EVIDENCE_ID` (facts only, see "Source evidence"), `--target-version VERSION`, and `--supersedes DECISION_UUID`. Responses include the new `entry_id`. Entry relations must target an existing row in the same source table. Remote `supersedes` records an explicit relationship; it does not update the earlier decision. Absolute paths and traversal are rejected. Missing targets or invalid relationships roll back the complete message, including its receipt and graph edits.
 
 Manage peers with `remote list` and `remote remove NAME`. Removal deletes only the peer configuration, preserving received state. `remote add` also accepts `--ash-config FILE` and `--elephant-path EXECUTABLE`. After `ensure-project` or a successful send, Elephant pins the peer's ID; an unexpected identity change fails. If B registers A and establishes its identity, B can use that registered name in `recall --remote NAME` instead of the UUID.
 
@@ -224,7 +244,7 @@ The default database is `~/Library/Application Support/elephant/elephant.zova` o
 
 Projects with equivalent normalized origin URLs share state, including across clones. Without an origin, the local Git common directory identifies the project, so linked worktrees share state. Adding or changing an origin can select a different project identity; v1 does not merge registries automatically. Entries are project-wide, not branch-scoped.
 
-The database contains a project registry, generated local and source-specific remote entry tables, a `project_tables` ownership registry, peer configuration, message receipts, schema metadata, and the named Zova graph `elephant`. SQL and graph edits share a transaction. Elephant schema 1 migrates transactionally to schema 2 on open, preserving existing rows and graphs; older rows receive `actor_id = "unknown"`. Unsupported schema versions and incompatible Zova formats are rejected. Schema 2 databases cannot be opened by older Elephant binaries. Zova may use transient journal files while writing.
+The database contains a project registry, generated local and source-specific remote entry tables, per-project evidence tables, a `project_tables` ownership registry, peer configuration, message receipts, schema metadata, and the named Zova graph `elephant`. SQL and graph edits share a transaction. Elephant schema 2 migrates transactionally to schema 3 on open, preserving existing rows and graphs; migration is idempotent. Unsupported schema versions and incompatible Zova formats are rejected. Schema 3 databases cannot be opened by older Elephant binaries. Zova may use transient journal files while writing.
 
 Recall returns up to 50 tasks **per unfinished status** (active, blocked, open), 50 active decisions, 50 active facts, 10 completed tasks, and 5 superseded decisions. A `truncated` map identifies categories with more entries. Use the list tools to page through them: default/maximum page size 200. Within each group, entries sort newest first with ID as the tie-breaker. `recall_project` also accepts an exact `target_version` filter.
 

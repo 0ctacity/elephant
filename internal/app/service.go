@@ -24,12 +24,19 @@ type RelationInput struct {
 	Type    string `json:"type"`
 	EntryID string `json:"entry_id"`
 }
+
+// EvidenceInput attaches local evidence to a remote send by entry ID.
+type EvidenceInput struct {
+	EntryID string `json:"entry_id"`
+}
+
 type CreateInput struct {
 	Title         string          `json:"title"`
 	Body          string          `json:"body"`
 	TargetVersion *string         `json:"target_version,omitempty"`
 	RelatedFiles  []string        `json:"related_files,omitempty"`
 	Relations     []RelationInput `json:"relations,omitempty"`
+	Evidence      []EvidenceInput `json:"evidence,omitempty"`
 	Supersedes    string          `json:"supersedes,omitempty"`
 }
 type UpdateInput struct {
