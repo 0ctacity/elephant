@@ -29,8 +29,14 @@ type Tx interface {
 	Unlink(model.Relation) error
 	Relations(string) ([]model.Relation, error)
 
+<<<<<<< HEAD
 	PutEvidence(model.Project, model.Evidence) error
 	Evidence(model.Project, string) ([]model.Evidence, error)
 	EvidenceByID(model.Project, string) (model.Evidence, error)
 	DeleteEvidence(model.Project, string) error
+=======
+	PutCheckpoint(model.Project, model.Checkpoint) error
+	GetCheckpoint(model.Project, string) (model.Checkpoint, error)
+	ListCheckpoints(model.Project, int, int) ([]model.Checkpoint, error)
+>>>>>>> 1be550d (feat: add structured session checkpoints)
 }

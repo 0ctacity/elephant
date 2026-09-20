@@ -142,6 +142,7 @@ The user-controlled `resume_project` prompt (optional `cwd`, `target_version`) r
 | Facts | `add_fact`, `update_fact`, `list_facts`, `retire_fact` |
 | Decisions | `add_decision`, `update_decision`, `list_decisions`, `supersede_decision` |
 | Tasks | `add_task`, `update_task`, `list_tasks`, `complete_task`, `cancel_task` |
+| Checkpoints | `add_checkpoint`, `list_checkpoints` |
 
 Create tools require `title` and `body`. They accept `target_version`, `related_files`, and typed entry `relations`:
 
@@ -179,6 +180,7 @@ Files are normalized repository-relative paths. File graph nodes include project
 
 Entry links must stay within one project. Dependencies are explicit links; Elephant does not schedule tasks or infer dependency completion.
 
+<<<<<<< HEAD
 ## Source evidence
 
 Facts can carry verifiable source evidence: a pointer to a repository file (and optional one-based line) pinned to the commit where it was captured plus a stable digest of the selected bytes. Evidence attaches only to facts, and only to paths present at HEAD — the digest is read from the commit, never from dirty working-tree bytes. Verification is deterministic — Elephant first re-reads the recorded commit, then compares the current checkout against the recorded digest, so it needs no network access and never guesses.
@@ -198,6 +200,18 @@ Each row reports one of four states: **unchanged** (the current selected bytes m
 Recall includes a bounded evidence section for active facts (limit 50) with the computed state per row. MCP exposes `add_evidence`, `list_evidence`, `verify_evidence`, `refresh_evidence`, and `remove_evidence`.
 
 Evidence can travel with a fact: `elephant remote send fact --evidence EVIDENCE_ID ...` attaches local evidence rows to the outgoing message. On send, rows are rebound to the new entry ID with fresh IDs and provenance (path, line, commit, digest) preserved; the receiver stores them with the sent entry and re-verifies them against its own checkout on recall, reporting `unavailable` when it cannot read the recorded commit or has no matching source. Sending is explicit per row — evidence never travels automatically.
+=======
+## Session checkpoints
+
+Checkpoints record where one coding session stopped and the next should resume. They are project-scoped and carry actor provenance, Git start/end commits, and timestamps.
+
+```sh
+elephant checkpoint --summary "Implemented authentication" --next "Add integration tests"
+elephant checkpoints --limit 10
+```
+
+`checkpoint` accepts `--completed`, `--next`, `--commands`, `--failures`, repeatable `--file PATH`, repeatable `--relation TYPE:ENTRY_UUID`, and `--start-commit COMMIT`. The start commit defaults to the previous checkpoint's end commit, otherwise to the current HEAD; the end commit is the current HEAD. Creation is atomic with file and entry links. MCP exposes `add_checkpoint` and `list_checkpoints`. `recall` includes the latest checkpoint with its relations before older project context.
+>>>>>>> 1be550d (feat: add structured session checkpoints)
 
 ## Sharing state with another Elephant
 

@@ -9,6 +9,7 @@ import (
 )
 
 type RecallResult struct {
+<<<<<<< HEAD
 	Project          model.Project    `json:"project"`
 	Git              gitrepo.Metadata `json:"git"`
 	Tasks            []model.Entry    `json:"tasks"`
@@ -19,6 +20,18 @@ type RecallResult struct {
 	RecentSuperseded []model.Entry    `json:"recent_superseded_decisions"`
 	Relations        []model.Relation `json:"relations"`
 	Truncated        map[string]bool  `json:"truncated"`
+=======
+	Project          model.Project     `json:"project"`
+	Git              gitrepo.Metadata  `json:"git"`
+	Checkpoint       *CheckpointRecord `json:"latest_checkpoint,omitempty"`
+	Tasks            []model.Entry     `json:"tasks"`
+	Decisions        []model.Entry     `json:"decisions"`
+	Facts            []model.Entry     `json:"facts"`
+	RecentCompleted  []model.Entry     `json:"recent_completed_tasks"`
+	RecentSuperseded []model.Entry     `json:"recent_superseded_decisions"`
+	Relations        []model.Relation  `json:"relations"`
+	Truncated        map[string]bool   `json:"truncated"`
+>>>>>>> 1be550d (feat: add structured session checkpoints)
 }
 
 // recallEvidenceLimit bounds verification work in one recall.
@@ -60,6 +73,7 @@ func (s *Service) recallWith(ctx context.Context, version string, within func(fu
 				out.Relations = append(out.Relations, links...)
 			}
 		}
+<<<<<<< HEAD
 		for _, fact := range out.Facts {
 			stored, err := tx.Evidence(p, fact.ID)
 			if err != nil {
@@ -79,6 +93,18 @@ func (s *Service) recallWith(ctx context.Context, version string, within func(fu
 			if out.Truncated["evidence"] {
 				break
 			}
+=======
+		latest, err := tx.ListCheckpoints(p, 1, 0)
+		if err != nil {
+			return err
+		}
+		if len(latest) == 1 {
+			links, err := tx.Relations(model.CheckpointNode(latest[0].ID))
+			if err != nil {
+				return err
+			}
+			out.Checkpoint = &CheckpointRecord{Checkpoint: latest[0], Relations: links}
+>>>>>>> 1be550d (feat: add structured session checkpoints)
 		}
 		return nil
 	})
