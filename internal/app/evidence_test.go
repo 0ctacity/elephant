@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -11,13 +12,44 @@ import (
 	"elephant/internal/storage/zova"
 )
 
+// committedRuntimeGo is the committed content every evidence test starts
+// from. Attach and refresh always read from a commit, so the file must exist
+// at HEAD for capture to succeed.
+const committedRuntimeGo = "package runtime\n\nconst Name = \"runtime\"\n\nfunc Run() {}\n"
+
 func evidenceRepo(t *testing.T) string {
 	t.Helper()
 	cwd := repo(t)
-	if err := os.WriteFile(filepath.Join(cwd, "runtime.go"), []byte("package runtime\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(cwd, "runtime.go"), []byte(committedRuntimeGo), 0600); err != nil {
 		t.Fatal(err)
 	}
+	commitFile(t, cwd, "runtime.go", "add runtime evidence fixture")
 	return cwd
+}
+
+func commitFile(t *testing.T, cwd, file, message string) string {
+	t.Helper()
+	for _, args := range [][]string{
+		{"-C", cwd, "add", "--", file},
+		{"-C", cwd, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", message},
+		{"-C", cwd, "rev-parse", "HEAD"},
+	} {
+		out, err := exec.Command("git", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+		if args[0] == "rev-parse" {
+			return string(out[:len(out)-1])
+		}
+	}
+	return ""
+}
+
+func writeWorkingFile(t *testing.T, cwd, file, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(cwd, file), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func evidenceService(t *testing.T, name string) *app.Service {

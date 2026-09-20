@@ -31,7 +31,7 @@ type evidenceRemoveInput struct {
 // registerEvidence exposes deterministic evidence operations. Verification is
 // read-only; only refresh and remove write, and neither changes entry state.
 func registerEvidence(s *sdk.Server, service *app.Service, cwd func(string) string) {
-	register(s, "add_evidence", "Attach a repository-relative file to a fact as verifiable evidence, capturing the current commit and file blob. The fact's lifecycle state is unchanged.", func(ctx context.Context, in evidenceAddInput) (app.EvidenceView, error) {
+	register(s, "add_evidence", "Attach a repository-relative file (and optional line) to a fact as verifiable evidence, capturing the current commit and the stable digest read from that commit. The fact's lifecycle state is unchanged.", func(ctx context.Context, in evidenceAddInput) (app.EvidenceView, error) {
 		return service.AddEvidence(ctx, cwd(in.CWD), in.EntryID, in.Path, in.Line)
 	})
 	register(s, "list_evidence", "List a fact's recorded evidence with its deterministic state: unchanged, changed, missing, or unavailable.", func(ctx context.Context, in evidenceEntryInput) ([]app.EvidenceView, error) {
@@ -40,7 +40,7 @@ func registerEvidence(s *sdk.Server, service *app.Service, cwd func(string) stri
 	register(s, "verify_evidence", "Re-verify a fact's evidence against the working tree without writing anything, reporting per-state counts.", func(ctx context.Context, in evidenceEntryInput) (app.EvidenceReport, error) {
 		return service.VerifyEvidence(ctx, cwd(in.CWD), in.EntryID)
 	})
-	register(s, "refresh_evidence", "Re-capture commit, blob, and verification time for a fact's evidence after an intentional review. Stored evidence and entry state are otherwise unchanged.", func(ctx context.Context, in evidenceRefreshInput) (app.EvidenceReport, error) {
+	register(s, "refresh_evidence", "Re-capture the commit digest and verification time for a fact's evidence after an intentional review. Stored evidence and entry state are otherwise unchanged.", func(ctx context.Context, in evidenceRefreshInput) (app.EvidenceReport, error) {
 		return service.RefreshEvidence(ctx, cwd(in.CWD), in.EntryID, in.EvidenceID)
 	})
 	register(s, "remove_evidence", "Remove one recorded evidence location from a fact.", func(ctx context.Context, in evidenceRemoveInput) (map[string]string, error) {

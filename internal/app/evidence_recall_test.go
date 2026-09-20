@@ -2,7 +2,6 @@ package app_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -21,9 +20,10 @@ func TestRecallDistinguishesEvidenceStates(t *testing.T) {
 	defer db.Close()
 	s := app.New(db)
 	steadyID, _ := attachFact(t, s, cwd, "runtime.go", 0)
-	if err = os.WriteFile(filepath.Join(cwd, "runtime.go"), []byte("package changed\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	// A committed change moves the first evidence to changed; attaching after
+	// the commit records the new digest as unchanged.
+	writeWorkingFile(t, cwd, "runtime.go", "package changed\n")
+	commitFile(t, cwd, "runtime.go", "changed revision")
 	extraFact, err := s.Add(ctx, cwd, model.Fact, app.CreateInput{Title: "Extra", Body: "Context"})
 	if err != nil {
 		t.Fatal(err)

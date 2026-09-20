@@ -181,7 +181,7 @@ Entry links must stay within one project. Dependencies are explicit links; Eleph
 
 ## Source evidence
 
-Facts can carry verifiable source evidence: a pointer to a repository file (and optional line) pinned to the commit and blob hash where it was captured. Evidence attaches only to facts. Verification is deterministic — Elephant re-reads the file from the working tree or the pinned commit and compares the blob hash, so it needs no network access and never guesses.
+Facts can carry verifiable source evidence: a pointer to a repository file (and optional one-based line) pinned to the commit where it was captured plus a stable digest of the selected bytes. Evidence attaches only to facts, and only to paths present at HEAD — the digest is read from the commit, never from dirty working-tree bytes. Verification is deterministic — Elephant first re-reads the recorded commit, then compares the current checkout against the recorded digest, so it needs no network access and never guesses.
 
 CLI:
 
@@ -193,11 +193,11 @@ elephant evidence refresh FACT_ID [--evidence EVIDENCE_ID]   # re-pin to current
 elephant evidence remove EVIDENCE_ID
 ```
 
-Each row reports one of four states: **verified** (blob hash matches the current content), **changed** (the file exists but its content differs from the pinned blob), **missing** (the path no longer exists), or **unavailable** (no local checkout or Git metadata to check against). Verification never mutates rows or retires a fact — a changed source is reported, not acted on. `refresh` re-pins rows to the current HEAD commit and blob. Up to 50 evidence locations are accepted per fact.
+Each row reports one of four states: **unchanged** (the current selected bytes match the recorded digest), **changed** (the file exists but its selected bytes differ), **missing** (the path or pinned line is confirmed absent from the working tree), or **unavailable** (no local checkout, or the recorded commit/object cannot be read). Verification never mutates rows or retires a fact — a changed source is reported, not acted on. `refresh` re-pins rows to the current HEAD commit and digest. Lines are validated against the file at capture; out-of-range lines are rejected. Up to 50 evidence locations are accepted per fact.
 
 Recall includes a bounded evidence section for active facts (limit 50) with the computed state per row. MCP exposes `add_evidence`, `list_evidence`, `verify_evidence`, `refresh_evidence`, and `remove_evidence`.
 
-Evidence can travel with a fact: `elephant remote send fact --evidence EVIDENCE_ID ...` attaches local evidence rows to the outgoing message. On send, rows are rebound to the new entry ID with fresh IDs and provenance (path, line, commit, blob) preserved; the receiver stores them with the sent entry and re-verifies them against its own checkout on recall, reporting `unavailable` when it has no matching source. Sending is explicit per row — evidence never travels automatically.
+Evidence can travel with a fact: `elephant remote send fact --evidence EVIDENCE_ID ...` attaches local evidence rows to the outgoing message. On send, rows are rebound to the new entry ID with fresh IDs and provenance (path, line, commit, digest) preserved; the receiver stores them with the sent entry and re-verifies them against its own checkout on recall, reporting `unavailable` when it cannot read the recorded commit or has no matching source. Sending is explicit per row — evidence never travels automatically.
 
 ## Sharing state with another Elephant
 

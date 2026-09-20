@@ -47,7 +47,9 @@ func (s *Service) VerifyEvidence(ctx context.Context, cwd, entryID string) (Evid
 }
 
 // AddEvidence records that a fact's knowledge came from a repository-relative
-// file, capturing the current commit, blob, and verification time.
+// file, capturing the current HEAD commit and the stable digest of the
+// selected line (or whole file) as read from that commit. Dirty working-tree
+// bytes are never recorded.
 func (s *Service) AddEvidence(ctx context.Context, cwd, entryID, path string, line int) (out EvidenceView, err error) {
 	err = s.within(ctx, cwd, func(tx storage.Tx, p model.Project, g gitrepo.Metadata) error {
 		e, err := tx.Get(p, entryID)
@@ -71,7 +73,7 @@ func (s *Service) AddEvidence(ctx context.Context, cwd, entryID, path string, li
 		if len(existing) >= MaxEvidencePerEntry {
 			return fmt.Errorf("%w: at most %d evidence locations per entry", model.ErrInvalidInput, MaxEvidencePerEntry)
 		}
-		blob, err := blobForEvidence(ctx, g, clean)
+		blob, err := captureEvidenceDigest(ctx, g.Root, g.Head, clean, line)
 		if err != nil {
 			return err
 		}
@@ -86,9 +88,10 @@ func (s *Service) AddEvidence(ctx context.Context, cwd, entryID, path string, li
 	return
 }
 
-// RefreshEvidence re-captures commit, blob, and verification time for one
+// RefreshEvidence re-captures the commit digest and verification time for one
 // evidence row, or for every row of an entry when evidenceID is empty. The
-// entry's lifecycle state is untouched.
+// digest is read from the current HEAD, never from dirty working-tree bytes.
+// The entry's lifecycle state is untouched.
 func (s *Service) RefreshEvidence(ctx context.Context, cwd, entryID, evidenceID string) (out EvidenceReport, err error) {
 	out = newEvidenceReport(entryID)
 	err = s.within(ctx, cwd, func(tx storage.Tx, p model.Project, g gitrepo.Metadata) error {
@@ -105,7 +108,7 @@ func (s *Service) RefreshEvidence(ctx context.Context, cwd, entryID, evidenceID 
 				continue
 			}
 			matched = true
-			blob, err := blobForEvidence(ctx, g, evidence.Path)
+			blob, err := captureEvidenceDigest(ctx, g.Root, g.Head, evidence.Path, evidence.Line)
 			if err != nil {
 				return err
 			}

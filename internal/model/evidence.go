@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// Evidence records where a fact's knowledge came from. Elephant compares the
-// recorded file blob with the current working tree; it never judges whether a
-// changed fact is still true.
+// Evidence records where a fact's knowledge came from. Blob holds the stable
+// hex digest of the selected content (one line without its terminator, or
+// the whole file when Line is 0) as read from Commit. Elephant compares that
+// digest with the recorded commit and then the working tree; it never judges
+// whether a changed fact is still true.
 type Evidence struct {
 	ID         string    `json:"id"`
 	EntryID    string    `json:"entry_id"`

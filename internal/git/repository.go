@@ -96,27 +96,6 @@ func Inspect(ctx context.Context, cwd string) (Metadata, error) {
 // content cannot be compared deterministically.
 var ErrNotRegularFile = errors.New("not a regular file")
 
-// FileBlob returns the Git blob hash of a working-tree file. A caller-provided
-// repository-relative path is resolved against root; a missing file returns an
-// error wrapping os.ErrNotExist.
-func FileBlob(ctx context.Context, root, path string) (string, error) {
-	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(path)))
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%w: %s", ErrNotRegularFile, path)
-	}
-	hash, err := runGit(ctx, root, "hash-object", "--", path)
-	if err != nil {
-		return "", err
-	}
-	if len(hash) != 40 && len(hash) != 64 || strings.ContainsAny(hash, " \t") {
-		return "", errors.New("unexpected Git blob hash")
-	}
-	return hash, nil
-}
-
 // NormalizeRemote returns the canonical host/path identity for a Git remote.
 // It accepts SSH scp syntax and URL forms. User information, query strings,
 // and fragments are omitted so credentials cannot become part of an identity.
@@ -177,6 +156,14 @@ func (e *commandError) Error() string {
 func (e *commandError) Unwrap() error { return e.err }
 
 func runGit(ctx context.Context, cwd string, args ...string) (string, error) {
+	out, err := runGitBytes(ctx, cwd, args...)
+	return strings.TrimSpace(string(out)), err
+}
+
+// runGitBytes runs Git and returns raw stdout. Unlike runGit it never trims,
+// so file content survives byte for byte. On failure the returned output is
+// the trimmed stdout for error classification.
+func runGitBytes(ctx context.Context, cwd string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = cwd
 	command.Env = withoutRepositoryLocationEnv()
@@ -185,15 +172,15 @@ func runGit(ctx context.Context, cwd string, args ...string) (string, error) {
 	output, err := command.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
+			return nil, ctxErr
 		}
-		return strings.TrimSpace(string(output)), &commandError{
+		return nil, &commandError{
 			args:   append([]string(nil), args...),
 			err:    err,
 			stderr: stderr.String(),
 		}
 	}
-	return strings.TrimSpace(string(output)), nil
+	return output, nil
 }
 
 func withoutRepositoryLocationEnv() []string {
