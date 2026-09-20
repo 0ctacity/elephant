@@ -15,7 +15,7 @@ import (
 
 func runRemote(ctx context.Context, s *app.Service, cwd string, args []string, logs io.Writer) (any, error) {
 	if len(args) == 0 {
-		return nil, fmt.Errorf("%w: remote list|add|remove|ensure-project|send|recall", model.ErrInvalidInput)
+		return nil, fmt.Errorf("%w: remote list|add|remove|ensure-project|send|recall|inbox|diff", model.ErrInvalidInput)
 	}
 	op := args[0]
 	args = args[1:]
@@ -24,6 +24,18 @@ func runRemote(ctx context.Context, s *app.Service, cwd string, args []string, l
 			return nil, model.ErrInvalidInput
 		}
 		return s.ListRemotes(ctx)
+	}
+	if op == "inbox" {
+		if len(args) != 0 {
+			return nil, model.ErrInvalidInput
+		}
+		return s.Inbox(ctx)
+	}
+	if op == "diff" {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("%w: remote diff requires a remote name or source UUID", model.ErrInvalidInput)
+		}
+		return s.Diff(ctx, cwd, args[0])
 	}
 	if len(args) == 0 {
 		return nil, fmt.Errorf("%w: remote name required", model.ErrInvalidInput)

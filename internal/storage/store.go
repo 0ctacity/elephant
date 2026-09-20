@@ -28,4 +28,9 @@ type Tx interface {
 	Link(model.Project, model.Relation) error
 	Unlink(model.Relation) error
 	Relations(string) ([]model.Relation, error)
+
+	Sources() ([]model.Project, error)
+	RecordAdoption(model.Adoption) error
+	Adoption(projectIdentity, sourceElephantID, sourceEntryID string) (model.Adoption, error)
+	AdoptionsBySource(projectIdentity, sourceElephantID string) ([]model.Adoption, error)
 }

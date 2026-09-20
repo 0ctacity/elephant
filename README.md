@@ -176,7 +176,17 @@ Manage peers with `remote list` and `remote remove NAME`. Removal deletes only t
 
 `remote recall NAME` contacts that peer to inspect **this installation's source table there**. It returns the result without importing it. In contrast, `recall --remote NAME_OR_UUID` reads a source table already stored locally. These commands preserve source boundaries and return the same bounded context categories as local recall.
 
-MCP adds `list_remotes`, `ensure_remote_project`, `remote_send_fact`, `remote_send_decision`, `remote_send_task`, and `remote_recall`. The latter reads locally received state. Existing local tools retain their local-only behavior.
+Review received state without merging:
+
+```bash
+elephant remote inbox
+elephant remote diff fedora
+elephant adopt ENTRY_ID --from fedora
+```
+
+`inbox` groups received additions by source Elephant and project. `diff` compares one source table with local state, listing `remote_only` entries that have not been adopted. `adopt` creates a new local entry with a new local ID, copies file links, copies entry relations only when their local targets resolve safely, and records source provenance; repeating the same adoption returns the existing local entry. No automatic merging occurs.
+
+MCP adds `list_remotes`, `ensure_remote_project`, `remote_send_fact`, `remote_send_decision`, `remote_send_task`, `remote_recall`, `remote_inbox`, `remote_diff`, and `adopt_entry`. The latter reads locally received state. Existing local tools retain their local-only behavior.
 
 ### Machine protocol and ASH
 

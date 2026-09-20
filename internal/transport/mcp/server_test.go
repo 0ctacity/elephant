@@ -44,7 +44,7 @@ func TestMCPToolsValidationAndContinuity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 22 {
+	if len(tools.Tools) != 25 {
 		t.Fatalf("tools=%d", len(tools.Tools))
 	}
 	rr, re := session.CallTool(ctx, &sdk.CallToolParams{Name: "list_remotes", Arguments: map[string]any{}})
