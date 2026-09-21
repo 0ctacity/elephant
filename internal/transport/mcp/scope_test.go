@@ -3,9 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,57 +43,68 @@ func TestFileURIToPath(t *testing.T) {
 	}
 }
 
-func TestResolveCWDSelection(t *testing.T) {
-	ctx := context.Background()
-	lister := func(roots ...*sdk.Root) RootsLister {
-		return func(context.Context) (*sdk.ListRootsResult, error) {
-			return &sdk.ListRootsResult{Roots: roots}, nil
-		}
+func TestRequestScopeSelection(t *testing.T) {
+	// Without a roots-capable client the server directory always wins,
+	// including when an (untrusted) response map is somehow present.
+	if got, need := RequestScope(nil, "/explicit", nil, "/default"); got != "/explicit" || need {
+		t.Fatalf("explicit lost: %q %v", got, need)
 	}
-	root := func(uri string) *sdk.Root { return &sdk.Root{URI: uri} }
-	if got := ResolveCWD(ctx, "/explicit", lister(root("file:///other")), "/default"); got != "/explicit" {
-		t.Fatalf("explicit lost: %q", got)
+	if got, need := RequestScope(nil, "", nil, "/default"); got != "/default" || need {
+		t.Fatalf("nil session: %q need=%v", got, need)
 	}
-	if got := ResolveCWD(ctx, "", nil, "/default"); got != "/default" {
-		t.Fatalf("nil lister: %q", got)
-	}
-	errLister := RootsLister(func(context.Context) (*sdk.ListRootsResult, error) { return nil, context.DeadlineExceeded })
-	if got := ResolveCWD(ctx, "", errLister, "/default"); got != "/default" {
-		t.Fatalf("error lister: %q", got)
-	}
-	if got := ResolveCWD(ctx, "", lister(), "/default"); got != "/default" {
-		t.Fatalf("no roots: %q", got)
+	// A wrong-kind input response resolves to the default rather than failing.
+	bad := sdk.InputResponseMap{rootsInputRequestID: &sdk.ElicitResult{}}
+	if got, need := RequestScope(nil, "", bad, "/default"); got != "/default" || need {
+		t.Fatalf("malformed response: %q need=%v", got, need)
 	}
 	// First usable file root wins; invalid and non-file roots are skipped.
-	got := ResolveCWD(ctx, "", lister(root("::bad"), root("https://example.com/x"), root("file:///second"), root("file:///third")), "/default")
-	if got != "/second" {
-		t.Fatalf("multiple roots: %q", got)
+	res := &sdk.ListRootsResult{Roots: []*sdk.Root{{URI: "::bad"}, {URI: "https://example.com/x"}, {URI: "file:///second"}, {URI: "file:///third"}}}
+	path, ok := FirstFileRoot(res.Roots)
+	if !ok || path != "/second" {
+		t.Fatalf("multiple roots: %q %v", path, ok)
 	}
 	if _, ok := FirstFileRoot([]*sdk.Root{nil}); ok {
 		t.Fatal("nil root accepted")
 	}
+	if _, ok := FirstFileRoot(nil); ok {
+		t.Fatal("no roots accepted")
+	}
 }
 
-func TestRootsProtocolAdvertisementAndChange(t *testing.T) {
+func TestResourceAndPromptResolveAdvertisedRoots(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	// A probe tool that resolves scope through the SEP-2322 multi-round-trip
-	// flow: the first call requests client roots, the retry consumes them.
-	// This is the only server-initiated roots path the negotiated protocol
-	// allows.
-	probe := sdk.NewServer(&sdk.Implementation{Name: "probe", Version: "1"}, nil)
-	sdk.AddTool(probe, &sdk.Tool{Name: "where"}, func(ctx context.Context, req *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, string, error) {
-		if len(req.Params.InputResponses) == 0 {
-			return &sdk.CallToolResult{InputRequests: sdk.InputRequestMap{"client_roots": &sdk.ListRootsParams{}}}, "", nil
+	// Two distinct repositories plus the server directory. A resource or
+	// prompt read without an explicit cwd must resolve to the repository the
+	// client currently advertises, and follow root changes.
+	repoA, repoB, serverDir := t.TempDir(), t.TempDir(), t.TempDir()
+	mkRepo := func(dir, name string) {
+		t.Helper()
+		for _, args := range [][]string{
+			{"init", "-q", dir},
+			{"-C", dir, "remote", "add", "origin", "https://github.com/test/" + name + ".git"},
+			{"-C", dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "initial"},
+		} {
+			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("%s %v", out, err)
+			}
 		}
-		roots, ok := req.Params.InputResponses["client_roots"].(*sdk.ListRootsResult)
-		if !ok {
-			return nil, "", fmt.Errorf("missing roots response")
-		}
-		return nil, ResolveCWD(ctx, "", func(context.Context) (*sdk.ListRootsResult, error) { return roots, nil }, "/default"), nil
-	})
+	}
+	mkRepo(repoA, "repoa")
+	mkRepo(repoB, "repob")
+	uriA := "file://" + repoA
+	uriB := "file://" + repoB
+
+	db, err := zova.Open(filepath.Join(t.TempDir(), "roots.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	svc := app.New(db)
+	server := New(svc, serverDir)
+
 	st, ct := sdk.NewInMemoryTransports()
-	ss, err := probe.Connect(ctx, st, nil)
+	ss, err := server.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,67 +112,109 @@ func TestRootsProtocolAdvertisementAndChange(t *testing.T) {
 	client := sdk.NewClient(&sdk.Implementation{Name: "roots-test", Version: "1"}, &sdk.ClientOptions{
 		Capabilities: &sdk.ClientCapabilities{RootsV2: &sdk.RootCapabilities{ListChanged: true}},
 	})
-	client.AddRoots(&sdk.Root{URI: "file:///first", Name: "first"}, &sdk.Root{URI: "https://example.com/remote", Name: "remote"})
+	client.AddRoots(&sdk.Root{URI: uriA, Name: "a"}, &sdk.Root{URI: "https://example.com/remote", Name: "remote"})
 	session, err := client.Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	// The client actually advertised and responded to roots through the
-	// protocol: the first file root resolves.
-	call := func() string {
+
+	// The actual resource handler runs across the protocol: the client
+	// advertises its roots, fulfills the input request, and the retry reads
+	// the repository the client currently advertises.
+	recallProject := func(want string) {
 		t.Helper()
-		res, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "where"})
-		if err != nil || res.IsError {
-			t.Fatalf("%v %+v", err, res)
+		rr, err := session.ReadResource(ctx, &sdk.ReadResourceParams{URI: resourceRecall})
+		if err != nil {
+			t.Fatalf("read resource: %v", err)
 		}
-		var cwd string
-		data, _ := json.Marshal(res.StructuredContent)
-		if err := json.Unmarshal(data, &cwd); err != nil {
-			t.Fatalf("%s %v", data, err)
+		var packet app.RecallResult
+		if err = json.Unmarshal([]byte(rr.Contents[0].Text), &packet); err != nil {
+			t.Fatal(err)
 		}
-		return cwd
+		if packet.Project.Identity != want {
+			t.Fatalf("resource resolved %q, want %q", packet.Project.Identity, want)
+		}
 	}
-	if got := call(); got != "/first" {
-		t.Fatalf("advertised roots did not resolve: %q", got)
+	// The resume_project prompt resolves the same way without an explicit cwd.
+	promptProject := func(want string) {
+		t.Helper()
+		pr, err := session.GetPrompt(ctx, &sdk.GetPromptParams{Name: "resume_project"})
+		if err != nil {
+			t.Fatalf("get prompt: %v", err)
+		}
+		if len(pr.Messages) == 0 {
+			t.Fatal("empty prompt")
+		}
+		text := pr.Messages[0].Content.(*sdk.TextContent).Text
+		if !strings.Contains(text, want) {
+			t.Fatalf("prompt resolved wrong repository, want %q: %q", want, text)
+		}
 	}
-	// Roots-changed notification: the updated set resolves on the next call.
-	client.AddRoots(&sdk.Root{URI: "file:///added", Name: "added"})
-	client.RemoveRoots("file:///first")
-	if got := call(); got != "/added" {
-		t.Fatalf("changed roots did not resolve: %q", got)
-	}
-	// A client advertising no usable roots falls back to the default.
-	bareProbe := sdk.NewServer(&sdk.Implementation{Name: "bare-probe", Version: "1"}, nil)
-	sdk.AddTool(bareProbe, &sdk.Tool{Name: "where"}, func(ctx context.Context, req *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, string, error) {
-		if len(req.Params.InputResponses) == 0 {
-			return &sdk.CallToolResult{InputRequests: sdk.InputRequestMap{"client_roots": &sdk.ListRootsParams{}}}, "", nil
-		}
-		roots, _ := req.Params.InputResponses["client_roots"].(*sdk.ListRootsResult)
-		var list []*sdk.Root
-		if roots != nil {
-			list = roots.Roots
-		}
-		if path, ok := FirstFileRoot(list); ok {
-			return nil, path, nil
-		}
-		return nil, "/default", nil
-	})
-	st2, ct2 := sdk.NewInMemoryTransports()
-	ss2, err := bareProbe.Connect(ctx, st2, nil)
+	recallProject("github.com/test/repoa")
+	promptProject("github.com/test/repoa")
+
+	// Changing the advertised roots selects a different repository on the
+	// next read: a roots/listChanged notification followed by the fulfilled
+	// roots request in the retry.
+	client.AddRoots(&sdk.Root{URI: uriB, Name: "b"})
+	client.RemoveRoots(uriA)
+	recallProject("github.com/test/repob")
+	promptProject("github.com/test/repob")
+
+	// An explicit cwd still wins over advertised roots.
+	pr, err := session.GetPrompt(ctx, &sdk.GetPromptParams{Name: "resume_project", Arguments: map[string]string{"cwd": repoA}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ss2.Close()
-	bare := sdk.NewClient(&sdk.Implementation{Name: "bare", Version: "1"}, nil)
-	session2, err := bare.Connect(ctx, ct2, nil)
+	if text := pr.Messages[0].Content.(*sdk.TextContent).Text; !strings.Contains(text, "github.com/test/repoa") {
+		t.Fatalf("explicit cwd lost: %q", text)
+	}
+}
+
+func TestResourceWithoutRootsFallsBackToServerDirectory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	serverDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", serverDir},
+		{"-C", serverDir, "remote", "add", "origin", "https://github.com/test/serverdir.git"},
+		{"-C", serverDir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "initial"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+	}
+	db, err := zova.Open(filepath.Join(t.TempDir(), "fallback.zova"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session2.Close()
-	res, err := session2.CallTool(ctx, &sdk.CallToolParams{Name: "where"})
-	if err != nil || res.IsError {
-		t.Fatalf("%v %+v", err, res)
+	defer db.Close()
+	server := New(app.New(db), serverDir)
+	st, ct := sdk.NewInMemoryTransports()
+	ss, err := server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	// A client without the roots capability: no roots request may be issued,
+	// and reads resolve to the server directory.
+	client := sdk.NewClient(&sdk.Implementation{Name: "bare", Version: "1"}, nil)
+	session, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	rr, err := session.ReadResource(ctx, &sdk.ReadResourceParams{URI: resourceRecall})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packet app.RecallResult
+	if err = json.Unmarshal([]byte(rr.Contents[0].Text), &packet); err != nil {
+		t.Fatal(err)
+	}
+	if packet.Project.Identity != "github.com/test/serverdir" {
+		t.Fatalf("fallback project: %+v", packet.Project)
 	}
 }
 
