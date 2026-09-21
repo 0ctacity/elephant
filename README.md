@@ -85,6 +85,30 @@ Run against an existing Git repository:
 
 Global flags (`--cwd`, `--db`) precede the command. If omitted, `cwd` is the process working directory. Output is JSON, except help and version. `facts`, `decisions`, and `tasks` accept `--status`, `--target-version`, `--limit`, and `--offset`; `inspect ENTRY_ID` includes outgoing relationships.
 
+## Set up an agent
+
+`setup` writes Elephant's MCP server entry into a supported agent's configuration:
+
+```sh
+elephant setup codex
+elephant setup opencode
+```
+
+Codex uses `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, and receives a `[mcp_servers.elephant]` table plus an `[mcp_servers.elephant.env]` table. OpenCode uses `$OPENCODE_CONFIG` or `$XDG_CONFIG_HOME/opencode/opencode.json`, defaulting to `~/.config/opencode/opencode.json`, and receives a `mcp.servers.elephant` object with `"type": "local"` (an older `mcp.elephant` entry is migrated forward). Both entries launch the resolved executable as `elephant --db /path/to/elephant.zova serve` and set an explicit `ELEPHANT_ACTOR_ID` so entries carry provenance. Writes go through a synced temporary file plus atomic rename, so an interrupted setup never leaves a truncated configuration.
+
+Setup edits only Elephant's own entry and preserves every other setting. It is idempotent: running it again with the same command and actor writes nothing. Pass `--actor ID` to choose the identity, or `--config FILE` to write a specific configuration file. Unsupported agents are not modified; the command prints a copy-ready example instead.
+
+`doctor` reports whether the installation is usable:
+
+```sh
+elephant doctor
+elephant doctor --json
+```
+
+The checks cover the executable path and version, database accessibility and schema compatibility, Git availability, the MCP launch command and which agents have Elephant registered, the effective actor identity, and configured ASH remotes. Each finding is `ok`, `warning`, or `error`: a missing database, an unconfigured agent, an unset actor, and absent remotes are warnings, while an incompatible schema, an unreadable database, or a missing Git is an error. Errors exit nonzero; warnings exit zero. `--json` prints the same checks as a structured object with a top-level `status`. Restoring database health may complete a pending explicit schema migration, because Elephant opens the database to validate it.
+
+Tests for both commands point `HOME`, `CODEX_HOME`, and `XDG_CONFIG_HOME` at temporary directories, so they never read or write a developer's real agent configuration.
+
 ## Connect an agent
 
 Use your coding harness's MCP server configuration. A typical server entry is:
@@ -210,7 +234,7 @@ go vet ./...
 
 Tests use temporary Git repositories and `.zova` databases. They cover identity, lifecycle validation, atomic rollback, graph persistence, project isolation, pagination, concurrent database handles, and a real MCP stdio process restarted between agents.
 
-The boundaries are `internal/model` (records and validation), `internal/app` (workflows and recall), `internal/storage` (transaction interface and Zova implementation), `internal/git` (Git commands), and `internal/transport/mcp` (protocol adapter). The CLI composes them in `cmd/elephant`.
+The boundaries are `internal/model` (records and validation), `internal/app` (workflows and recall), `internal/storage` (transaction interface and Zova implementation), `internal/git` (Git commands), `internal/agent` (agent configuration discovery and editing), and `internal/transport/mcp` (protocol adapter). The CLI composes them in `cmd/elephant`.
 
 Logs use `slog` on stderr. Set `ELEPHANT_LOG_LEVEL=debug` for underlying diagnostics; normal tool errors omit native database details. Stdout is reserved for MCP traffic when serving.
 
