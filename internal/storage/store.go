@@ -28,4 +28,9 @@ type Tx interface {
 	Link(model.Project, model.Relation) error
 	Unlink(model.Relation) error
 	Relations(string) ([]model.Relation, error)
+
+	PutEvidence(model.Project, model.Evidence) error
+	Evidence(model.Project, string) ([]model.Evidence, error)
+	EvidenceByID(model.Project, string) (model.Evidence, error)
+	DeleteEvidence(model.Project, string) error
 }

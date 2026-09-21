@@ -20,14 +20,15 @@ type ProjectRef struct {
 	Name     string `json:"name"`
 }
 type Message struct {
-	ProtocolVersion  int             `json:"protocol_version"`
-	MessageID        string          `json:"message_id"`
-	SenderElephantID string          `json:"sender_elephant_id"`
-	Project          ProjectRef      `json:"project"`
-	Operation        string          `json:"operation"`
-	Entry            *model.Entry    `json:"entry,omitempty"`
-	Files            []string        `json:"files,omitempty"`
-	Relations        []RelationInput `json:"relations,omitempty"`
+	ProtocolVersion  int              `json:"protocol_version"`
+	MessageID        string           `json:"message_id"`
+	SenderElephantID string           `json:"sender_elephant_id"`
+	Project          ProjectRef       `json:"project"`
+	Operation        string           `json:"operation"`
+	Entry            *model.Entry     `json:"entry,omitempty"`
+	Files            []string         `json:"files,omitempty"`
+	Relations        []RelationInput  `json:"relations,omitempty"`
+	Evidence         []model.Evidence `json:"evidence,omitempty"`
 }
 type Response struct {
 	EntryID         string        `json:"entry_id,omitempty"`
@@ -61,7 +62,7 @@ func validateMessage(m Message) error {
 		return fmt.Errorf("%w: unknown operation", model.ErrInvalidInput)
 	}
 	if m.Operation != "entry.send" {
-		if m.Entry != nil || len(m.Files)+len(m.Relations) > 0 {
+		if m.Entry != nil || len(m.Files)+len(m.Relations)+len(m.Evidence) > 0 {
 			return model.ErrInvalidInput
 		}
 		return nil
@@ -94,6 +95,22 @@ func validateMessage(m Message) error {
 		}
 		if !validID(r.EntryID) || r.EntryID == m.Entry.ID {
 			return model.ErrInvalidInput
+		}
+	}
+	if len(m.Evidence) > MaxEvidencePerEntry {
+		return fmt.Errorf("%w: at most %d evidence locations per entry", model.ErrInvalidInput, MaxEvidencePerEntry)
+	}
+	seen := map[string]bool{}
+	for _, evidence := range m.Evidence {
+		if !validID(evidence.ID) || evidence.EntryID != m.Entry.ID {
+			return fmt.Errorf("%w: evidence IDs must be UUIDv7 and target the sent entry", model.ErrInvalidInput)
+		}
+		if seen[evidence.ID] {
+			return fmt.Errorf("%w: duplicate evidence ID", model.ErrInvalidInput)
+		}
+		seen[evidence.ID] = true
+		if err := evidence.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -139,7 +156,8 @@ func (s *Service) Receive(ctx context.Context, m Message) (out Response, err err
 			Entry     *model.Entry
 			Files     []string
 			Relations []RelationInput
-		}{m.Entry, m.Files, m.Relations})
+			Evidence  []model.Evidence
+		}{m.Entry, m.Files, m.Relations, m.Evidence})
 		seen, err := tx.Message(m.Entry.ID, entryDigest, "entry:"+out.Table.TableName)
 		if err != nil || seen {
 			return err
@@ -164,6 +182,12 @@ func (s *Service) Receive(ctx context.Context, m Message) (out Response, err err
 				return err
 			}
 			if err = tx.Link(p, model.Relation{From: model.EntryNode(p, e.ID), Type: r.Type, To: model.EntryNode(p, r.EntryID)}); err != nil {
+				return err
+			}
+		}
+		for _, evidence := range m.Evidence {
+			evidence.EntryID = e.ID
+			if err := tx.PutEvidence(p, evidence); err != nil {
 				return err
 			}
 		}
@@ -248,6 +272,44 @@ func (s *Service) BuildMessage(ctx context.Context, cwd, operation string, k mod
 		if in.Supersedes != "" {
 			m.Relations = append(m.Relations, RelationInput{Type: "supersedes", EntryID: in.Supersedes})
 		}
+		if in.Evidence != nil {
+			attached, err := s.evidenceForSend(ctx, cwd, m.Entry.ID, in.Evidence)
+			if err != nil {
+				return Message{}, err
+			}
+			m.Evidence = attached
+		}
 	}
 	return m, validateMessage(m)
+}
+
+// evidenceForSend resolves locally stored evidence to full records for a
+// remote send. Local row IDs are never trusted across the wire boundary;
+// after validation the rows are rebound to the new entry ID, so evidence
+// always travels with and targets the entry it describes.
+func (s *Service) evidenceForSend(ctx context.Context, cwd, entryID string, rows []EvidenceInput) (out []model.Evidence, err error) {
+	err = s.within(ctx, cwd, func(tx storage.Tx, p model.Project, _ gitrepo.Metadata) error {
+		if len(rows) > MaxEvidencePerEntry {
+			return fmt.Errorf("%w: at most %d evidence locations per entry", model.ErrInvalidInput, MaxEvidencePerEntry)
+		}
+		for _, row := range rows {
+			source, sourceErr := tx.EvidenceByID(p, row.EntryID)
+			if sourceErr != nil {
+				return sourceErr
+			}
+			e, getErr := tx.Get(p, source.EntryID)
+			if getErr != nil {
+				return getErr
+			}
+			if e.Kind != model.Fact {
+				return fmt.Errorf("%w: evidence can only be attached to facts", model.ErrInvalidInput)
+			}
+			source.ID = uuid.Must(uuid.NewV7()).String()
+			source.EntryID = entryID
+			source.VerifiedAt = time.Now().UTC()
+			out = append(out, source)
+		}
+		return nil
+	})
+	return
 }
