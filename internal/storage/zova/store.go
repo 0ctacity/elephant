@@ -70,7 +70,7 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 				return t.migrate()
 			}
 			rows, err := t.query("SELECT value FROM elephant_meta WHERE key='schema_version'")
-			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2") {
+			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2" && value(rows[0][0]) != "3" && value(rows[0][0]) != "4") {
 				return model.ErrSchema
 			}
 			has, err := db.HasGraph(graph)
@@ -80,8 +80,16 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 			if !has {
 				return model.ErrSchema
 			}
-			if value(rows[0][0]) == "1" {
+			switch value(rows[0][0]) {
+			case "1":
 				return t.migrate()
+			case "2":
+				if err := t.migrateEvidence(); err != nil {
+					return err
+				}
+				return t.migrateCheckpoints()
+			case "3":
+				return t.migrateCheckpoints()
 			}
 			return nil
 		})
@@ -132,6 +140,8 @@ func (t *transaction) query(sql string, args ...any) ([][]*string, error) {
 			}
 		case int:
 			err = stmt.BindInt64(i+1, int64(v))
+		case nil:
+			err = stmt.BindNull(i + 1)
 		default:
 			return nil, fmt.Errorf("%w: unsupported SQL binding", model.ErrStorage)
 		}
@@ -231,10 +241,116 @@ CREATE INDEX ` + name + `_version ON ` + name + `(target_version);`)
 	if err != nil {
 		return fmt.Errorf("%w: %w", model.ErrStorage, err)
 	}
+	return t.createEvidenceTable(name)
+}
+
+// createEvidenceTable is idempotent so schema migration can add it to projects
+// that predate evidence.
+func (t *transaction) createEvidenceTable(name string) error {
+	err := t.db.Exec(`CREATE TABLE IF NOT EXISTS ` + name + `_evidence (id TEXT PRIMARY KEY,entry_id TEXT NOT NULL,path TEXT NOT NULL,line INTEGER,commit_hash TEXT,blob TEXT,created_at TEXT NOT NULL,verified_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ` + name + `_evidence_entry ON ` + name + `_evidence(entry_id,created_at,id);`)
+	if err != nil {
+		return fmt.Errorf("%w: %w", model.ErrStorage, err)
+	}
 	return nil
 }
 
 const columns = "id,kind,title,body,status,target_version,start_commit,end_commit,created_at,updated_at,actor_id"
+
+const evidenceColumns = "id,entry_id,path,line,commit_hash,blob,created_at,verified_at"
+
+func (t *transaction) evidenceTable(p model.Project) (string, error) {
+	name, err := table(p)
+	if err != nil {
+		return "", err
+	}
+	return name + "_evidence", nil
+}
+
+func (t *transaction) PutEvidence(p model.Project, e model.Evidence) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	if _, err := t.Get(p, e.EntryID); err != nil {
+		return err
+	}
+	name, err := t.evidenceTable(p)
+	if err != nil {
+		return err
+	}
+	line := any(nil)
+	if e.Line > 0 {
+		line = e.Line
+	}
+	_, err = t.query("INSERT INTO "+name+"("+evidenceColumns+") VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,line=excluded.line,commit_hash=excluded.commit_hash,blob=excluded.blob,verified_at=excluded.verified_at",
+		e.ID, e.EntryID, e.Path, line, e.Commit, e.Blob, stamp(e.CreatedAt), stamp(e.VerifiedAt))
+	return err
+}
+
+func (t *transaction) Evidence(p model.Project, entryID string) ([]model.Evidence, error) {
+	name, err := t.evidenceTable(p)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := t.query("SELECT "+evidenceColumns+" FROM "+name+" WHERE entry_id=? ORDER BY created_at,id", entryID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Evidence, 0, len(rows))
+	for _, row := range rows {
+		evidence, err := decodeEvidence(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, evidence)
+	}
+	return out, nil
+}
+
+func (t *transaction) EvidenceByID(p model.Project, id string) (model.Evidence, error) {
+	name, err := t.evidenceTable(p)
+	if err != nil {
+		return model.Evidence{}, err
+	}
+	rows, err := t.query("SELECT "+evidenceColumns+" FROM "+name+" WHERE id=?", id)
+	if err != nil {
+		return model.Evidence{}, err
+	}
+	if len(rows) == 0 {
+		return model.Evidence{}, model.ErrEvidenceNotFound
+	}
+	return decodeEvidence(rows[0])
+}
+
+func (t *transaction) DeleteEvidence(p model.Project, id string) error {
+	name, err := t.evidenceTable(p)
+	if err != nil {
+		return err
+	}
+	if _, err = t.EvidenceByID(p, id); err != nil {
+		return err
+	}
+	_, err = t.query("DELETE FROM "+name+" WHERE id=?", id)
+	return err
+}
+
+func decodeEvidence(r []*string) (model.Evidence, error) {
+	created, err := parseTime(r[6])
+	if err != nil {
+		return model.Evidence{}, err
+	}
+	verified, err := parseTime(r[7])
+	if err != nil {
+		return model.Evidence{}, err
+	}
+	line := 0
+	if raw := value(r[3]); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &line); err != nil {
+			return model.Evidence{}, fmt.Errorf("%w: invalid evidence line %q", model.ErrStorage, raw)
+		}
+	}
+	return model.Evidence{ID: value(r[0]), EntryID: value(r[1]), Path: value(r[2]), Line: line, Commit: value(r[4]), Blob: value(r[5]), CreatedAt: created, VerifiedAt: verified}, nil
+}
 
 func decode(r []*string) (model.Entry, error) {
 	c, err := parseTime(r[8])

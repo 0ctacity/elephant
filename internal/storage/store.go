@@ -33,4 +33,11 @@ type Tx interface {
 	RecordAdoption(model.Adoption) error
 	Adoption(projectIdentity, sourceElephantID, sourceEntryID string) (model.Adoption, error)
 	AdoptionsBySource(projectIdentity, sourceElephantID string) ([]model.Adoption, error)
+	PutEvidence(model.Project, model.Evidence) error
+	Evidence(model.Project, string) ([]model.Evidence, error)
+	EvidenceByID(model.Project, string) (model.Evidence, error)
+	DeleteEvidence(model.Project, string) error
+	PutCheckpoint(model.Project, model.Checkpoint) error
+	GetCheckpoint(model.Project, string) (model.Checkpoint, error)
+	ListCheckpoints(model.Project, int, int) ([]model.Checkpoint, error)
 }

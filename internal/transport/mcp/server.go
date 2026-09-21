@@ -58,7 +58,7 @@ func PublicError(err error) error {
 		return nil
 	}
 	slog.Debug("operation failed", "error", err)
-	for _, known := range []error{model.ErrRemote, model.ErrInvalidInput, model.ErrInvalidKind, model.ErrInvalidStatus, model.ErrInvalidTransition, model.ErrEntryNotFound, model.ErrProjectNotFound, model.ErrRelationNotFound, model.ErrSchema, gitrepo.ErrNotGitRepository, context.Canceled, context.DeadlineExceeded} {
+	for _, known := range []error{model.ErrRemote, model.ErrInvalidInput, model.ErrInvalidKind, model.ErrInvalidStatus, model.ErrInvalidTransition, model.ErrEntryNotFound, model.ErrProjectNotFound, model.ErrRelationNotFound, model.ErrSchema, model.ErrDiagnostics, gitrepo.ErrNotGitRepository, context.Canceled, context.DeadlineExceeded} {
 		if errors.Is(err, known) {
 			return err
 		}
@@ -81,6 +81,9 @@ func New(service *app.Service, defaultCWD string) *sdk.Server {
 	}
 	registerRemotes(s, service, cwd)
 	registerAdopt(s, service, cwd)
+	registerResources(s, service, defaultCWD)
+	registerEvidence(s, service, cwd)
+	registerCheckpoints(s, service, cwd)
 	register(s, "recall_project", "Get bounded active project knowledge, unfinished work, recent history, file relations, and current Git state.", func(ctx context.Context, in recallInput) (app.RecallResult, error) {
 		return service.Recall(ctx, cwd(in.CWD), in.TargetVersion)
 	})

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +35,8 @@ const usage = `Elephant — local continuity for coding agents
 Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
 
   serve                 Run the MCP stdio server (also the default command)
+  setup AGENT           Register the MCP server with codex or opencode
+  doctor [--json]       Diagnose executable, database, Git, MCP, actor, remotes
   recall                Show saved project context and unfinished work
   identity              Show this installation’s stable Elephant ID
   remote                Manage peers, ensure projects, send entries, or fetch state
@@ -44,13 +45,30 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
   facts|decisions|tasks  List entries (--status, --target-version, --limit, --offset)
   inspect ID            Show an entry and its relationships
   adopt ENTRY_ID --from NAME_OR_UUID  Promote a received entry into local truth
+  evidence add ENTRY_ID --file PATH [--line N]
+  evidence list|verify ENTRY_ID
+  evidence refresh ENTRY_ID [--evidence EVIDENCE_ID]
+  evidence remove EVIDENCE_ID
+  checkpoint --summary TEXT [--completed TEXT ...] [--next TEXT ...]
+             [--commands TEXT ...] [--failures TEXT ...]
+             [--file PATH ...] [--relation TYPE:ID ...] [--start-commit COMMIT]
+  checkpoints [--limit N] [--offset N]  List session checkpoints
   add fact|decision|task --title TEXT --body TEXT [--target-version TEXT] [--file PATH ...]
+  remote send fact --title TEXT --body TEXT [--evidence EVIDENCE_ID ...]
+                   [--file PATH ...] [--relation TYPE:ENTRY_UUID ...]
   --version             Print version
 
 Use recall --remote NAME_OR_UUID for a locally stored remote source table.
 remote inbox groups received additions by source; remote diff NAME compares
 one source table with local state; adopt creates a new local entry with
 provenance and is idempotent.
+setup accepts --actor ID and --config FILE; unsupported agents print an example.
+doctor prints text by default and structured JSON with --json.
+recall includes a bounded evidence section for active facts; verification
+reports unchanged, changed, missing, or unavailable and never retires a fact.
+'remote send --evidence' carries a local evidence row with the sent fact;
+the receiver re-verifies it against its own checkout on recall.
+recall includes the latest checkpoint before older project context.
 ELEPHANT_ACTOR_ID identifies the actor creating rows (default: unknown).
 ELEPHANT_DB overrides the default database path.
 ELEPHANT_LOG_LEVEL accepts debug, info, warn, or error. Logs go to stderr.
@@ -122,6 +140,12 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 		command = rest[0]
 		rest = rest[1:]
 	}
+	switch command {
+	case "setup":
+		return runSetup(ctx, out, logs, rest, *dbPath)
+	case "doctor":
+		return runDoctor(ctx, out, logs, rest, *dbPath)
+	}
 	db, err := zova.Open(*dbPath)
 	if err != nil {
 		return err
@@ -162,6 +186,8 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 		} else {
 			result, err = service.RecallRemote(ctx, *cwd, *source)
 		}
+	case "evidence":
+		result, err = runEvidence(ctx, service, *cwd, rest, logs)
 	case "status":
 		if len(rest) != 0 {
 			return model.ErrInvalidInput
@@ -187,6 +213,10 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 			return fmt.Errorf("%w: inspect requires one entry ID", model.ErrInvalidInput)
 		}
 		result, err = service.Get(ctx, *cwd, rest[0])
+	case "checkpoint":
+		result, err = runCheckpoint(ctx, service, *cwd, rest, logs)
+	case "checkpoints":
+		result, err = runCheckpoints(ctx, service, *cwd, rest, logs)
 	case "add":
 		if len(rest) == 0 {
 			return fmt.Errorf("%w: add requires fact, decision, or task", model.ErrInvalidInput)
@@ -227,7 +257,5 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 	if err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(out)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(result)
+	return writeJSON(out, result)
 }

@@ -86,9 +86,10 @@ func runRemote(ctx context.Context, s *app.Service, cwd string, args []string, l
 		body := f.String("body", "", "context")
 		version := f.String("target-version", "", "release or milestone")
 		supersedes := f.String("supersedes", "", "remote decision ID")
-		var files, relations fileFlags
+		var files, relations, evidence fileFlags
 		f.Var(&files, "file", "repository-relative file; repeatable")
 		f.Var(&relations, "relation", "TYPE:ENTRY_UUID; repeatable")
+		f.Var(&evidence, "evidence", "local evidence row ID to carry; repeatable")
 		if err := f.Parse(args); err != nil {
 			return nil, err
 		}
@@ -111,6 +112,9 @@ func runRemote(ctx context.Context, s *app.Service, cwd string, args []string, l
 				return nil, model.ErrInvalidInput
 			}
 			in.Relations = append(in.Relations, app.RelationInput{Type: typ, EntryID: id})
+		}
+		for _, raw := range evidence {
+			in.Evidence = append(in.Evidence, app.EvidenceInput{EntryID: raw})
 		}
 		m, err := s.BuildMessage(ctx, cwd, "entry.send", kind, in)
 		if err != nil {

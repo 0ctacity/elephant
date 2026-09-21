@@ -184,6 +184,24 @@ func (t *fakeTx) Relations(nodeID string) ([]model.Relation, error) {
 	return append([]model.Relation(nil), t.st.links[nodeID]...), nil
 }
 
+func (t *fakeTx) PutEvidence(model.Project, model.Evidence) error { return nil }
+func (t *fakeTx) Evidence(model.Project, string) ([]model.Evidence, error) {
+	return nil, nil
+}
+func (t *fakeTx) EvidenceByID(model.Project, string) (model.Evidence, error) {
+	return model.Evidence{}, model.ErrEntryNotFound
+}
+func (t *fakeTx) DeleteEvidence(model.Project, string) error { return nil }
+func (t *fakeTx) PutCheckpoint(model.Project, model.Checkpoint) error {
+	return nil
+}
+func (t *fakeTx) GetCheckpoint(model.Project, string) (model.Checkpoint, error) {
+	return model.Checkpoint{}, model.ErrEntryNotFound
+}
+func (t *fakeTx) ListCheckpoints(model.Project, int, int) ([]model.Checkpoint, error) {
+	return nil, nil
+}
+
 func (t *fakeTx) Sources() ([]model.Project, error) {
 	out := []model.Project{}
 	for _, p := range t.st.projects {

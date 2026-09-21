@@ -39,6 +39,36 @@ func (t *transaction) migrate() error {
 		}
 	}
 	_, err = t.query("UPDATE elephant_meta SET value='2' WHERE key='schema_version'")
+	if err != nil {
+		return err
+	}
+	if err = t.migrateEvidence(); err != nil {
+		return err
+	}
+	return t.migrateCheckpoints()
+}
+
+// migrateEvidence upgrades schema 2 by adding the per-project evidence table.
+// It is idempotent and transactional with the version stamp.
+func (t *transaction) migrateEvidence() error {
+	rows, err := t.query("SELECT identity FROM projects")
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		p, err := t.Project(value(r[0]))
+		if err != nil {
+			return err
+		}
+		name, err := table(p)
+		if err != nil {
+			return err
+		}
+		if err = t.createEvidenceTable(name); err != nil {
+			return err
+		}
+	}
+	_, err = t.query("UPDATE elephant_meta SET value='3' WHERE key='schema_version'")
 	return err
 }
 func (t *transaction) Identity() (string, error) {

@@ -149,8 +149,8 @@ CREATE INDEX ` + tableName + `_version ON ` + tableName + `(target_version);`)
 				if err != nil {
 					return err
 				}
-				if len(rows) != 1 || value(rows[0][0]) != "2" {
-					return fmt.Errorf("migration did not persist schema 2")
+				if len(rows) != 1 || value(rows[0][0]) != "4" {
+					return fmt.Errorf("migration did not persist schema 4")
 				}
 				rows, err = tx.(*transaction).query("SELECT id FROM project_tables")
 				if err != nil {
@@ -158,6 +158,15 @@ CREATE INDEX ` + tableName + `_version ON ` + tableName + `(target_version);`)
 				}
 				if len(rows) != 2 {
 					return fmt.Errorf("unexpected project table count: %d", len(rows))
+				}
+				for _, tableName := range []string{"p_0123456789abcdef0123456789abcdef", "p_abcdef0123456789abcdef0123456789"} {
+					rows, err = tx.(*transaction).query("SELECT id FROM " + tableName + "_evidence")
+					if err != nil {
+						return fmt.Errorf("migration did not create the evidence table: %w", err)
+					}
+					if len(rows) != 0 {
+						return fmt.Errorf("unexpected evidence rows after migration: %d", len(rows))
+					}
 				}
 				return nil
 			})
