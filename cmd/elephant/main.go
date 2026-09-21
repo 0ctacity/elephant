@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -293,11 +292,7 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 		if readErr != nil {
 			return readErr
 		}
-		var env app.ExportEnvelope
-		if err = json.Unmarshal(data, &env); err != nil {
-			return fmt.Errorf("%w: invalid export JSON: %v", model.ErrInvalidInput, err)
-		}
-		result, err = service.Import(ctx, env, *asRemote)
+		result, err = service.Import(ctx, data, *asRemote)
 	case "backup":
 		f := flag.NewFlagSet("backup", flag.ContinueOnError)
 		f.SetOutput(logs)

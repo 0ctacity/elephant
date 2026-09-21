@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,6 +22,10 @@ func registerPortable(s *sdk.Server, service *app.Service, cwd func(string) stri
 		return service.Export(ctx, cwd(in.CWD))
 	})
 	register(s, "import_project", "Validate an export envelope fully before storing it in a separate archive source table; never overwrites local truth.", func(ctx context.Context, in importInput) (model.Project, error) {
-		return service.Import(ctx, in.Envelope, in.AsRemote)
+		data, err := json.Marshal(in.Envelope)
+		if err != nil {
+			return model.Project{}, fmt.Errorf("encode import envelope: %w", err)
+		}
+		return service.Import(ctx, data, in.AsRemote)
 	})
 }

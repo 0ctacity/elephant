@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,13 +27,35 @@ import (
 // relations only) remain readable on import.
 const ExportFormatVersion = 2
 
-// ExportEnvelope is the portable, inspectable backup of one project's memory.
-// It carries global IDs and every stored record class so a backup restores a
-// byte-comparable project state elsewhere. No wall-clock export time is
-// recorded, so identical stored state serializes identically.
+// Export limits bound archive size before any work begins.
+const (
+	maxExportEntries     = 10000
+	maxExportRelations   = 20000
+	maxExportEvidence    = 500000
+	maxExportCheckpoints = 10000
+	maxExportAdoptions   = 10000
+	maxExportBytes       = 32 << 20
+)
+
+// ExportProject identifies the exported project and the installation that
+// exported it. The receiver records the sender as provenance but always
+// places rows in its own source table, so imports never overwrite local
+// truth and never trust remote table ownership.
+type ExportProject struct {
+	Identity         string `json:"identity"`
+	Name             string `json:"name"`
+	SourceElephantID string `json:"source_elephant_id"`
+}
+
+// ExportEnvelope is the portable, inspectable backup of one project's
+// memory: format version, project and source metadata, entries sorted by ID,
+// relations sorted by from/type/to, evidence sorted by entry/creation/ID,
+// checkpoints in creation order, and adoption receipts sorted by source and
+// source entry. The envelope carries no wall-clock fields, so identical
+// stored state serializes byte-identically.
 type ExportEnvelope struct {
 	FormatVersion int                `json:"format_version"`
-	Project       ProjectRef         `json:"project"`
+	Project       ExportProject      `json:"project"`
 	Entries       []model.Entry      `json:"entries"`
 	Relations     []model.Relation   `json:"relations"`
 	Evidence      []model.Evidence   `json:"evidence"`
@@ -39,18 +63,16 @@ type ExportEnvelope struct {
 	Adoptions     []model.Adoption   `json:"adoptions"`
 }
 
-// Export returns a deterministic snapshot of the local project: entries sorted
-// by ID, relations sorted by from/type/to, evidence sorted by entry/created/ID,
-// checkpoints sorted by creation order, and adoption receipts sorted by
-// source/entry. Actors, lifecycle fields (status, target version, start and end
-// commits), and timestamps ride inside the records themselves.
+// Export returns a deterministic snapshot of the local project. Actors,
+// lifecycle fields (status, target version, start and end commits), and
+// timestamps ride inside the records themselves.
 func (s *Service) Export(ctx context.Context, cwd string) (out ExportEnvelope, err error) {
 	g, err := gitrepo.Inspect(ctx, cwd)
 	if err != nil {
 		return out, err
 	}
 	out.FormatVersion = ExportFormatVersion
-	out.Project = ProjectRef{Identity: g.Identity, Name: g.Name}
+	out.Project = ExportProject{Identity: g.Identity, Name: g.Name}
 	out.Entries = []model.Entry{}
 	out.Relations = []model.Relation{}
 	out.Evidence = []model.Evidence{}
@@ -61,6 +83,11 @@ func (s *Service) Export(ctx context.Context, cwd string) (out ExportEnvelope, e
 		if err != nil {
 			return err
 		}
+		self, err := tx.Identity()
+		if err != nil {
+			return err
+		}
+		out.Project.SourceElephantID = self
 		offset := 0
 		for {
 			page, err := tx.List(local, model.Filter{Limit: 200, Offset: offset})
@@ -162,32 +189,43 @@ func sortExportEnvelope(env *ExportEnvelope) {
 	})
 }
 
-// exportContentDigest canonically digests the record sections of an envelope,
-// so identical content yields an identical key regardless of JSON ordering.
-func exportContentDigest(entries []model.Entry, relations []model.Relation) (string, error) {
-	b, err := json.Marshal(struct {
-		Entries   []model.Entry    `json:"entries"`
-		Relations []model.Relation `json:"relations"`
-	}{entries, relations})
+// exportContentDigest is the canonical digest of validated archive content.
+// Every record section marshals deterministically after sorting, so the
+// digest keys import idempotency: same archive plus same digest is a repeat,
+// same archive plus a different digest is an explicit conflict.
+func exportContentDigest(env ExportEnvelope) (string, error) {
+	payload, err := json.Marshal(struct {
+		Project     ExportProject      `json:"project"`
+		Entries     []model.Entry      `json:"entries"`
+		Relations   []model.Relation   `json:"relations"`
+		Evidence    []model.Evidence   `json:"evidence"`
+		Checkpoints []model.Checkpoint `json:"checkpoints"`
+		Adoptions   []model.Adoption   `json:"adoptions"`
+	}{env.Project, env.Entries, env.Relations, env.Evidence, env.Checkpoints, env.Adoptions})
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(b)), nil
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", sum), nil
 }
 
-// decodeExportEnvelope strictly decodes one JSON export: unknown fields and
-// trailing data are rejected so malformed archives never import partially.
-// Version 1 archives (entries and relations only) are accepted and upgraded
-// in memory; version 2 must carry every section.
+// decodeExportEnvelope strictly decodes an archive: unknown fields and
+// trailing data are rejected before anything is validated or stored. Version
+// 1 archives (entries and relations only) are accepted and upgraded in
+// memory; version 2 must carry every section.
 func decodeExportEnvelope(data []byte) (ExportEnvelope, error) {
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
 	var env ExportEnvelope
+	if len(data) > maxExportBytes {
+		return env, fmt.Errorf("%w: import file too large", model.ErrInvalidInput)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&env); err != nil {
 		return env, fmt.Errorf("%w: invalid export JSON: %v", model.ErrInvalidInput, err)
 	}
-	if decoder.More() {
-		return env, fmt.Errorf("%w: trailing data after export JSON", model.ErrInvalidInput)
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return env, fmt.Errorf("%w: trailing data after export envelope", model.ErrInvalidInput)
 	}
 	if env.FormatVersion == 1 {
 		env.Evidence = []model.Evidence{}
@@ -197,13 +235,18 @@ func decodeExportEnvelope(data []byte) (ExportEnvelope, error) {
 	return env, nil
 }
 
-// Import validates an envelope fully before committing anything, then stores
-// it in a separate remote/archive source table so local truth is never
-// overwritten. Reimporting the same archive is idempotent: an identical
-// archive identity and content digest returns the existing source, while the
-// same name with conflicting content fails explicitly. Validation failures
-// leave no partial rows, links, evidence, checkpoints, or receipts.
-func (s *Service) Import(ctx context.Context, env ExportEnvelope, asRemote string) (out model.Project, err error) {
+// Import validates an archive completely before committing anything, then
+// stores it in a separate archive source table so local truth is never
+// overwritten. Idempotency is keyed by archive identity plus the canonical
+// content digest: repeating an identical import returns the existing source,
+// while conflicting content under the same archive name fails explicitly.
+// A failed import rolls back tables, rows, graph nodes and edges,
+// checkpoints, evidence, and receipts together.
+func (s *Service) Import(ctx context.Context, data []byte, asRemote string) (out model.Project, err error) {
+	env, err := decodeExportEnvelope(data)
+	if err != nil {
+		return out, err
+	}
 	if env.FormatVersion != ExportFormatVersion && env.FormatVersion != 1 {
 		return out, fmt.Errorf("%w: unsupported export format version %d (expected %d)", model.ErrInvalidInput, env.FormatVersion, ExportFormatVersion)
 	}
@@ -213,11 +256,14 @@ func (s *Service) Import(ctx context.Context, env ExportEnvelope, asRemote strin
 	if !validText(asRemote, 100) || validID(asRemote) {
 		return out, fmt.Errorf("%w: archive name required (not a UUID)", model.ErrInvalidInput)
 	}
-	if !validText(env.Project.Identity, 2048) || !validText(env.Project.Name, 300) {
-		return out, fmt.Errorf("%w: export project identity required", model.ErrInvalidInput)
+	if !validText(env.Project.Identity, 2048) || !validText(env.Project.Name, 300) || !validText(env.Project.SourceElephantID, 300) {
+		return out, fmt.Errorf("%w: export project and source identity required", model.ErrInvalidInput)
 	}
-	if len(env.Entries) > 10000 || len(env.Relations) > 20000 || len(env.Evidence) > 500000 || len(env.Checkpoints) > 10000 || len(env.Adoptions) > 10000 {
+	if len(env.Entries) > maxExportEntries || len(env.Relations) > maxExportRelations || len(env.Evidence) > maxExportEvidence || len(env.Checkpoints) > maxExportCheckpoints || len(env.Adoptions) > maxExportAdoptions {
 		return out, fmt.Errorf("%w: export too large", model.ErrInvalidInput)
+	}
+	if env.Entries == nil || env.Relations == nil {
+		return out, fmt.Errorf("%w: export entries and relations are required", model.ErrInvalidInput)
 	}
 	// Full validation before any mutation.
 	ids := map[string]model.Entry{}
@@ -264,7 +310,7 @@ func (s *Service) Import(ctx context.Context, env ExportEnvelope, asRemote strin
 		}
 		to, ok := ids[toID]
 		if !ok {
-			return out, fmt.Errorf("%w: relation target unknown", model.ErrInvalidInput)
+			return out, fmt.Errorf("%w: relation target unknown (ownership crossings rejected)", model.ErrInvalidInput)
 		}
 		if err := model.ValidateRelation(from.Kind, r.Type, to.Kind); err != nil {
 			return out, err
@@ -325,25 +371,28 @@ func (s *Service) Import(ctx context.Context, env ExportEnvelope, asRemote strin
 		}
 		adoptKeys[a.SourceElephantID+"\x00"+a.SourceEntryID] = true
 	}
-	// Idempotency: an identical reimport returns the existing source; a
-	// conflicting content digest under the same archive name fails loudly.
+	_ = adoptKeys
+	// Idempotency: an identical reimport returns the existing source; the
+	// same name with conflicting content fails explicitly (Message reports a
+	// digest mismatch).
+	sortExportEnvelope(&env)
+	contentDigest, err := exportContentDigest(env)
+	if err != nil {
+		return out, err
+	}
 	sourceID := "import:" + asRemote
-	archiveDigest := digest(struct {
-		Project     ProjectRef         `json:"project"`
-		Entries     []model.Entry      `json:"entries"`
-		Relations   []model.Relation   `json:"relations"`
-		Evidence    []model.Evidence   `json:"evidence"`
-		Checkpoints []model.Checkpoint `json:"checkpoints"`
-		Adoptions   []model.Adoption   `json:"adoptions"`
-	}{env.Project, env.Entries, env.Relations, env.Evidence, env.Checkpoints, env.Adoptions})
 	err = s.store.Transact(ctx, func(tx storage.Tx) error {
-		seen, err := tx.Message(sourceID, archiveDigest, "import")
+		seen, err := tx.Message(sourceID, contentDigest, "import")
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: archive %q was already imported with different content", model.ErrInvalidInput, asRemote)
 		}
 		if seen {
-			out, err = tx.Source(env.Project.Identity, sourceID)
-			return err
+			src, err := tx.Source(env.Project.Identity, sourceID)
+			if err != nil {
+				return err
+			}
+			out = src
+			return nil
 		}
 		src, err := tx.EnsureSource(model.Project{Identity: env.Project.Identity, Name: env.Project.Name}, sourceID)
 		if err != nil {
@@ -376,10 +425,8 @@ func (s *Service) Import(ctx context.Context, env ExportEnvelope, asRemote strin
 		}
 		for _, c := range env.Checkpoints {
 			if err = tx.PutCheckpoint(src, c); err != nil {
-				println("DEBUG PutCheckpoint failed:", err.Error())
 				return err
 			}
-			println("DEBUG PutCheckpoint ok:", c.ID, "table:", src.TableName)
 		}
 		for _, a := range env.Adoptions {
 			if err = tx.RecordAdoption(a); err != nil {
@@ -418,44 +465,43 @@ func filePathFromNode(n string) string {
 	return rest
 }
 
-// Backup stages a storage-safe snapshot in a sibling temp file and renames it
-// into place only on success. A failed backup preserves any existing
-// destination and leaves no temp litter. The rename replaces existing
+// Backup writes a storage-safe consistent snapshot to dest while the database
+// stays open. The snapshot is staged in a sibling temporary file and renamed
+// into place only on success, so a failed backup preserves any existing
+// destination and leaves no litter behind. The rename replaces existing
 // destinations on Unix and on Windows: os.Rename maps to MoveFileEx with
 // MOVEFILE_REPLACE_EXISTING, and a lingering read handle from a concurrent
 // reader is resolved by one bounded replace window before failing.
 func (s *Service) Backup(ctx context.Context, dest string) error {
-	_ = ctx
-	dir := filepath.Dir(dest)
-	base := filepath.Base(dest)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*.zova")
+	if filepath.Ext(dest) != ".zova" {
+		return fmt.Errorf("%w: backup destination must end in .zova", model.ErrInvalidInput)
+	}
+	dir := filepath.Dir(dest)
+	tmp, err := os.CreateTemp(dir, ".elephant-backup-*.zova")
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: stage backup: %v", model.ErrInvalidInput, err)
 	}
 	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
 	if err = tmp.Close(); err != nil {
-		return err
+		os.Remove(tmpName)
+		return fmt.Errorf("%w: stage backup: %v", model.ErrInvalidInput, err)
 	}
 	// Zova requires a .zova destination and refuses any existing file, so the
-	// reserved name is removed before the store writes the snapshot.
+	// reserved placeholder is removed before the store writes the snapshot.
 	if err = os.Remove(tmpName); err != nil {
-		return err
+		return fmt.Errorf("%w: stage backup: %v", model.ErrInvalidInput, err)
 	}
 	if err = s.store.Backup(tmpName); err != nil {
+		os.Remove(tmpName)
 		return err
 	}
 	if err = replaceFile(tmpName, dest); err != nil {
+		os.Remove(tmpName)
 		return err
 	}
-	tmpName = ""
 	return nil
 }
 
