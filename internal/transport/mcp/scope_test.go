@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,25 @@ import (
 	"elephant/internal/model"
 	"elephant/internal/storage/zova"
 )
+
+// fileURIFromPath converts a local directory to a correctly encoded file://
+// root URI on every platform: forward slashes throughout, a leading slash
+// before Windows drive letters (file:///D:/path/to/repo), and URL-escaped
+// special characters. Raw string concatenation would emit backslashes on
+// Windows, which are invalid in URIs and silently fall back to the server
+// directory.
+func fileURIFromPath(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slash := filepath.ToSlash(abs)
+	if !strings.HasPrefix(slash, "/") {
+		slash = "/" + slash
+	}
+	return (&url.URL{Scheme: "file", Path: slash}).String()
+}
 
 func TestFileURIToPath(t *testing.T) {
 	for _, tc := range []struct {
@@ -40,6 +61,44 @@ func TestFileURIToPath(t *testing.T) {
 		if got, err := FileURIToPath(uri); err == nil {
 			t.Errorf("%q: accepted as %q", uri, got)
 		}
+	}
+}
+
+func TestFileURIFromPathRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	uri := fileURIFromPath(t, dir)
+	if !strings.HasPrefix(uri, "file:///") {
+		t.Fatalf("URI %q must carry an absolute path", uri)
+	}
+	if strings.ContainsAny(uri, "\\") {
+		t.Fatalf("URI %q must not contain backslashes", uri)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := FileURIToPath(uri)
+	if err != nil {
+		t.Fatalf("helper output %q rejected: %v", uri, err)
+	}
+	if got != filepath.ToSlash(abs) {
+		t.Fatalf("round trip: got %q want %q", got, filepath.ToSlash(abs))
+	}
+	// A directory with spaces must survive URL encoding.
+	spaced := filepath.Join(dir, "with space")
+	if err := os.Mkdir(spaced, 0700); err != nil {
+		t.Fatal(err)
+	}
+	got, err = FileURIToPath(fileURIFromPath(t, spaced))
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, err = filepath.Abs(spaced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.ToSlash(abs) {
+		t.Fatalf("encoded round trip: got %q want %q", got, filepath.ToSlash(abs))
 	}
 }
 
@@ -92,8 +151,8 @@ func TestResourceAndPromptResolveAdvertisedRoots(t *testing.T) {
 	}
 	mkRepo(repoA, "repoa")
 	mkRepo(repoB, "repob")
-	uriA := "file://" + repoA
-	uriB := "file://" + repoB
+	uriA := fileURIFromPath(t, repoA)
+	uriB := fileURIFromPath(t, repoB)
 
 	db, err := zova.Open(filepath.Join(t.TempDir(), "roots.zova"))
 	if err != nil {
