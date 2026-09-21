@@ -33,4 +33,7 @@ type Tx interface {
 	Evidence(model.Project, string) ([]model.Evidence, error)
 	EvidenceByID(model.Project, string) (model.Evidence, error)
 	DeleteEvidence(model.Project, string) error
+	PutCheckpoint(model.Project, model.Checkpoint) error
+	GetCheckpoint(model.Project, string) (model.Checkpoint, error)
+	ListCheckpoints(model.Project, int, int) ([]model.Checkpoint, error)
 }

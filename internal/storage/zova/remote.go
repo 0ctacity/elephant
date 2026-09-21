@@ -42,7 +42,10 @@ func (t *transaction) migrate() error {
 	if err != nil {
 		return err
 	}
-	return t.migrateEvidence()
+	if err = t.migrateEvidence(); err != nil {
+		return err
+	}
+	return t.migrateCheckpoints()
 }
 
 // migrateEvidence upgrades schema 2 by adding the per-project evidence table.

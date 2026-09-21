@@ -9,16 +9,17 @@ import (
 )
 
 type RecallResult struct {
-	Project          model.Project    `json:"project"`
-	Git              gitrepo.Metadata `json:"git"`
-	Tasks            []model.Entry    `json:"tasks"`
-	Decisions        []model.Entry    `json:"decisions"`
-	Facts            []model.Entry    `json:"facts"`
-	Evidence         []EvidenceView   `json:"evidence"`
-	RecentCompleted  []model.Entry    `json:"recent_completed_tasks"`
-	RecentSuperseded []model.Entry    `json:"recent_superseded_decisions"`
-	Relations        []model.Relation `json:"relations"`
-	Truncated        map[string]bool  `json:"truncated"`
+	Project          model.Project     `json:"project"`
+	Git              gitrepo.Metadata  `json:"git"`
+	Checkpoint       *CheckpointRecord `json:"latest_checkpoint,omitempty"`
+	Tasks            []model.Entry     `json:"tasks"`
+	Decisions        []model.Entry     `json:"decisions"`
+	Facts            []model.Entry     `json:"facts"`
+	Evidence         []EvidenceView    `json:"evidence"`
+	RecentCompleted  []model.Entry     `json:"recent_completed_tasks"`
+	RecentSuperseded []model.Entry     `json:"recent_superseded_decisions"`
+	Relations        []model.Relation  `json:"relations"`
+	Truncated        map[string]bool   `json:"truncated"`
 }
 
 // recallEvidenceLimit bounds verification work in one recall.
@@ -78,6 +79,22 @@ func (s *Service) recallWith(ctx context.Context, version string, within func(fu
 			}
 			if out.Truncated["evidence"] {
 				break
+			}
+		}
+		// Checkpoints are local-only: remote source recall must not leak
+		// local session boundaries. Rows are additionally scoped by project
+		// table in storage.
+		if p.Scope == "local" {
+			latest, err := tx.ListCheckpoints(p, 1, 0)
+			if err != nil {
+				return err
+			}
+			if len(latest) == 1 {
+				links, err := tx.Relations(model.CheckpointNode(p.TableName, latest[0].ID))
+				if err != nil {
+					return err
+				}
+				out.Checkpoint = &CheckpointRecord{Checkpoint: latest[0], Relations: links}
 			}
 		}
 		return nil
