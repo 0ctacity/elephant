@@ -36,7 +36,10 @@ func assertToolSet(t *testing.T, tools *sdk.ListToolsResult, required []string) 
 }
 
 func TestMCPToolsValidationAndContinuity(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The budget covers process startup, database open, and several
+	// sequential tool calls; Windows CI runners are significantly slower,
+	// so allow a full minute instead of failing on general slowness.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cwd := t.TempDir()
 	cmd := exec.Command("git", "init", "-q", cwd)
@@ -72,6 +75,7 @@ func TestMCPToolsValidationAndContinuity(t *testing.T) {
 		"add_task", "update_task", "list_tasks", "complete_task", "cancel_task",
 		"list_remotes", "ensure_remote_project",
 		"remote_send_fact", "remote_send_decision", "remote_send_task", "remote_recall",
+		"remote_inbox", "remote_diff", "adopt_entry",
 		"add_evidence", "list_evidence", "verify_evidence", "refresh_evidence", "remove_evidence",
 		"add_checkpoint", "list_checkpoints",
 	})

@@ -44,6 +44,7 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
   status                Show project identity and Git metadata
   facts|decisions|tasks  List entries (--status, --target-version, --limit, --offset)
   inspect ID            Show an entry and its relationships
+  adopt ENTRY_ID --from NAME_OR_UUID  Promote a received entry into local truth
   evidence add ENTRY_ID --file PATH [--line N]
   evidence list|verify ENTRY_ID
   evidence refresh ENTRY_ID [--evidence EVIDENCE_ID]
@@ -58,6 +59,9 @@ Usage: elephant [--cwd DIR] [--db FILE.zova] COMMAND
   --version             Print version
 
 Use recall --remote NAME_OR_UUID for a locally stored remote source table.
+remote inbox groups received additions by source; remote diff NAME compares
+one source table with local state; adopt creates a new local entry with
+provenance and is idempotent.
 setup accepts --actor ID and --config FILE; unsupported agents print an example.
 doctor prints text by default and structured JSON with --json.
 recall includes a bounded evidence section for active facts; verification
@@ -236,6 +240,17 @@ func run(ctx context.Context, args []string, out, logs io.Writer) error {
 			in.TargetVersion = target
 		}
 		result, err = service.Add(ctx, *cwd, kind, in)
+	case "adopt":
+		adopt := flag.NewFlagSet("adopt", flag.ContinueOnError)
+		adopt.SetOutput(logs)
+		from := adopt.String("from", "", "remote name or source Elephant UUID")
+		if err = adopt.Parse(rest); err != nil {
+			return err
+		}
+		if adopt.NArg() != 1 || *from == "" {
+			return fmt.Errorf("%w: adopt requires ENTRY_ID --from NAME_OR_UUID", model.ErrInvalidInput)
+		}
+		result, err = service.Adopt(ctx, *cwd, adopt.Arg(0), *from)
 	default:
 		return fmt.Errorf("%w: unknown command %q; use --help", model.ErrInvalidInput, command)
 	}

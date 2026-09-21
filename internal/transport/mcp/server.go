@@ -80,6 +80,7 @@ func New(service *app.Service, defaultCWD string) *sdk.Server {
 		return in
 	}
 	registerRemotes(s, service, cwd)
+	registerAdopt(s, service, cwd)
 	registerResources(s, service, defaultCWD)
 	registerEvidence(s, service, cwd)
 	registerCheckpoints(s, service, cwd)
