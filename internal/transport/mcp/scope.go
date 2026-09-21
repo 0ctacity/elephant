@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"strings"
@@ -9,42 +8,73 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// RootsLister supplies the client roots currently advertised to the server.
-// It is a function so scope resolution stays testable without a live session.
-type RootsLister func(ctx context.Context) (*sdk.ListRootsResult, error)
+// rootsInputRequestID is the request ID Elephant uses when a handler needs
+// the client's advertised roots through the multi round-trip flow.
+const rootsInputRequestID = "client_roots"
 
-// SessionRoots adapts a server session to a RootsLister. A nil session yields
-// nil, which resolves to the default. ListRoots failures inside request
-// handlers (the SDK forbids server-initiated requests while serving one, and
-// roots are deprecated upstream) also fall back to the default.
-func SessionRoots(session *sdk.ServerSession) RootsLister {
+// clientRootsCapable reports whether the session's client declared the roots
+// capability at initialization. Sessions without completed initialization
+// (including test doubles without one) resolve to the server default.
+func clientRootsCapable(session *sdk.ServerSession) bool {
 	if session == nil {
-		return nil
+		return false
 	}
-	return func(ctx context.Context) (*sdk.ListRootsResult, error) {
-		return session.ListRoots(ctx, nil)
+	iparams := session.InitializeParams()
+	if iparams == nil || iparams.Capabilities == nil {
+		return false
 	}
+	return iparams.Capabilities.RootsV2 != nil || iparams.Capabilities.Roots.ListChanged
 }
 
-// ResolveCWD selects the repository for one operation. An explicit cwd always
-// wins, then the first usable file:// root, then the server default. Roots
-// never cross project boundaries on their own: they only select which local
-// repository Elephant resolves, and every operation stays project-scoped.
-func ResolveCWD(ctx context.Context, explicit string, listRoots RootsLister, def string) string {
+// RootsInputRequests returns the input request that asks the client for its
+// advertised roots (SEP-2322). A resources/read or prompts/get handler
+// returns it with no content while serving a request, because the negotiated
+// protocol (2026-07-28, SEP-2322) forbids server-initiated roots/list there
+// and roots are deprecated upstream (SEP-2577). The SDK fulfills the request
+// — through the client on multi-round-trip protocol versions, and through a
+// transparent server-initiated list on older ones — and reinvokes the
+// handler with the roots echoed back in InputResponses.
+func RootsInputRequests() sdk.InputRequestMap {
+	return sdk.InputRequestMap{rootsInputRequestID: &sdk.ListRootsParams{}}
+}
+
+// RootsFromInputResponses returns the client roots echoed back on a
+// multi round-trip retry, or nil when the response is absent or malformed.
+func RootsFromInputResponses(responses sdk.InputResponseMap) *sdk.ListRootsResult {
+	if len(responses) == 0 {
+		return nil
+	}
+	res, _ := responses[rootsInputRequestID].(*sdk.ListRootsResult)
+	return res
+}
+
+// RequestScope resolves the repository for a resources/read or prompts/get
+// request. An explicit cwd always wins. Otherwise the client's advertised
+// roots select the first usable file:// root, with the server directory as
+// fallback when the client never advertised roots or none of its roots are
+// usable. Roots never cross project boundaries on their own: they only
+// select which local repository Elephant resolves, and every operation stays
+// project-scoped.
+//
+// needRoots is returned with an empty cwd when the handler must return
+// RootsInputRequests() instead of a result; the roots/list exchange then
+// repeats the request with the client's answer in InputResponses.
+func RequestScope(session *sdk.ServerSession, explicit string, responses sdk.InputResponseMap, def string) (cwd string, needRoots bool) {
 	if explicit != "" {
-		return explicit
+		return explicit, false
 	}
-	if listRoots == nil {
-		return def
+	if !clientRootsCapable(session) {
+		return def, false
 	}
-	res, err := listRoots(ctx)
-	if err != nil || res == nil {
-		return def
+	if len(responses) == 0 {
+		return "", true
 	}
-	if path, ok := FirstFileRoot(res.Roots); ok {
-		return path
+	if res := RootsFromInputResponses(responses); res != nil {
+		if path, ok := FirstFileRoot(res.Roots); ok {
+			return path, false
+		}
 	}
-	return def
+	return def, false
 }
 
 // FirstFileRoot returns the first root convertible to a local path, skipping
