@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -38,6 +39,13 @@ func TestInboxDiffAdopt(t *testing.T) {
 	}
 	defer db.Close()
 	s := app.New(db)
+	// File links now copy only when the target exists in the local repository,
+	// so create the referenced files before receiving.
+	for _, f := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(cwd, f), []byte("package shared"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	id := func() string { return uuid.Must(uuid.NewV7()).String() }
 	now := time.Now().UTC()
 	senderA, senderB := id(), id()

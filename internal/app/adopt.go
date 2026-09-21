@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,21 +27,24 @@ type InboxGroup struct {
 // DiffResult compares one remote source table with local state while keeping
 // both boundaries explicit.
 type DiffResult struct {
-	Project    model.Project     `json:"project"`
-	Source     model.Project     `json:"source"`
-	Local      []model.Entry     `json:"local"`
-	Remote     []model.Entry     `json:"remote"`
-	Adopted    map[string]string `json:"adopted"`
-	RemoteOnly []model.Entry     `json:"remote_only"`
+	Project     model.Project     `json:"project"`
+	Source      model.Project     `json:"source"`
+	Local       []model.Entry     `json:"local"`
+	Remote      []model.Entry     `json:"remote"`
+	Adopted     map[string]string `json:"adopted"`
+	RemoteOnly  []model.Entry     `json:"remote_only"`
+	Conflicting []model.Entry     `json:"conflicting"`
 }
 
 // AdoptResult reports the new local entry plus its preserved provenance.
+// Skipped names remote links that were not copied and why.
 type AdoptResult struct {
 	Entry            model.Entry      `json:"entry"`
 	Relations        []model.Relation `json:"relations"`
 	SourceElephantID string           `json:"source_elephant_id"`
 	SourceEntryID    string           `json:"source_entry_id"`
 	AlreadyAdopted   bool             `json:"already_adopted"`
+	Skipped          []string         `json:"skipped,omitempty"`
 }
 
 func (s *Service) resolveSource(ctx context.Context, tx storage.Tx, selector string) (model.Project, error) {
@@ -120,6 +124,12 @@ func (s *Service) Inbox(ctx context.Context) (out []InboxGroup, err error) {
 	return
 }
 
+// sameContent reports whether a remote row duplicates local knowledge: same
+// kind, title, and body. Such rows are conflicting rather than new.
+func sameContent(a, b model.Entry) bool {
+	return a.Kind == b.Kind && a.Title == b.Title && a.Body == b.Body
+}
+
 // Diff compares a remote source table with the local project state.
 func (s *Service) Diff(ctx context.Context, cwd, selector string) (out DiffResult, err error) {
 	g, err := gitrepo.Inspect(ctx, cwd)
@@ -144,6 +154,8 @@ func (s *Service) Diff(ctx context.Context, cwd, selector string) (out DiffResul
 		out.Local = []model.Entry{}
 		out.Remote = []model.Entry{}
 		out.Adopted = map[string]string{}
+		out.RemoteOnly = []model.Entry{}
+		out.Conflicting = []model.Entry{}
 		if out.Local, err = tx.List(local, model.Filter{Limit: 200}); err != nil {
 			return err
 		}
@@ -158,20 +170,59 @@ func (s *Service) Diff(ctx context.Context, cwd, selector string) (out DiffResul
 			out.Adopted[a.SourceEntryID] = a.LocalEntryID
 		}
 		for _, e := range out.Remote {
-			if _, ok := out.Adopted[e.ID]; !ok {
+			if _, ok := out.Adopted[e.ID]; ok {
+				continue
+			}
+			duplicate := false
+			for _, l := range out.Local {
+				if sameContent(e, l) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				out.Conflicting = append(out.Conflicting, e)
+			} else {
 				out.RemoteOnly = append(out.RemoteOnly, e)
 			}
-		}
-		if out.RemoteOnly == nil {
-			out.RemoteOnly = []model.Entry{}
 		}
 		return nil
 	})
 	return
 }
 
+// resolveLocalFile validates a repository-relative remote file path against
+// the local repository. It rejects anything CleanFile rejects, requires the
+// target to exist, and resolves symlinks so a link pointing outside the
+// repository (a symlink escape) is also rejected. The returned path stays in
+// slash-separated repository-relative form.
+func resolveLocalFile(root, file string) (string, error) {
+	clean, err := model.CleanFile(file)
+	if err != nil {
+		return "", err
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(rootAbs, filepath.FromSlash(clean)))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(rootAbs, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q resolves outside the repository", file)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
 // Adopt creates a new local entry from a received remote entry, preserving
-// provenance and remaining idempotent on repeat.
+// provenance and remaining idempotent on repeat. File links are copied only
+// when the path is valid and resolves to an existing file inside the local
+// repository; entry relations are copied only through prior adoption mappings
+// or validated local targets. Anything else is skipped and reported. Every
+// storage error aborts the transaction, rolling back the new entry, copied
+// links, and the provenance mapping together.
 func (s *Service) Adopt(ctx context.Context, cwd, entryID, selector string) (out AdoptResult, err error) {
 	g, err := gitrepo.Inspect(ctx, cwd)
 	if err != nil {
@@ -223,8 +274,9 @@ func (s *Service) Adopt(ctx context.Context, cwd, entryID, selector string) (out
 		if err = tx.Put(local, e); err != nil {
 			return err
 		}
-		// Copy file links only when the path is still valid; copy entry
-		// relations only when the local target can be resolved safely.
+		// Copy file links only when the path resolves safely inside the local
+		// repository; copy entry relations only through prior adoption mappings
+		// or validated local targets. Anything else is skipped and reported.
 		adoptedBySource := map[string]string{}
 		prior, err := tx.AdoptionsBySource(g.Identity, src.SourceElephantID)
 		if err != nil {
@@ -233,45 +285,52 @@ func (s *Service) Adopt(ctx context.Context, cwd, entryID, selector string) (out
 		for _, a := range prior {
 			adoptedBySource[a.SourceEntryID] = a.LocalEntryID
 		}
+		var skipped []string
 		for _, r := range remoteLinks {
 			if strings.HasPrefix(r.To, "file:"+src.ID+":") {
 				file := strings.TrimPrefix(r.To, "file:"+src.ID+":")
-				clean, err := model.CleanFile(file)
+				clean, err := resolveLocalFile(g.Root, file)
 				if err != nil {
+					skipped = append(skipped, fmt.Sprintf("file %q: %v", file, err))
 					continue
 				}
-				_ = tx.Link(local, model.Relation{From: model.EntryNode(local, e.ID), Type: model.FileEdge(e.Kind), To: "file:" + local.ID + ":" + clean})
+				if err = tx.Link(local, model.Relation{From: model.EntryNode(local, e.ID), Type: model.FileEdge(e.Kind), To: "file:" + local.ID + ":" + clean}); err != nil {
+					return err
+				}
 				continue
 			}
-			// Entry edge: remote node IDs are entry:<id> for local-scope
-			// sources in tests (Source with empty scope). Resolve the raw
-			// entry ID suffix and map through prior adoptions.
+			// Entry edge: resolve the raw entry ID suffix and map it through
+			// prior adoptions, else through validated local targets.
 			target := r.To
 			if i := strings.LastIndex(target, ":"); i >= 0 {
 				target = target[i+1:]
 			}
 			localTarget, ok := adoptedBySource[target]
 			if !ok {
-				// Only reuse targets that already exist locally with a
-				// compatible kind; otherwise skip rather than fail.
 				other, err := tx.Get(local, target)
 				if err != nil {
+					skipped = append(skipped, fmt.Sprintf("relation %s: no local target for %q", r.Type, target))
 					continue
 				}
 				if err = model.ValidateRelation(e.Kind, r.Type, other.Kind); err != nil {
+					skipped = append(skipped, fmt.Sprintf("relation %s: incompatible local target", r.Type))
 					continue
 				}
 				localTarget = other.ID
 			} else {
 				other, err := tx.Get(local, localTarget)
 				if err != nil {
+					skipped = append(skipped, fmt.Sprintf("relation %s: adopted target is gone", r.Type))
 					continue
 				}
 				if err = model.ValidateRelation(e.Kind, r.Type, other.Kind); err != nil {
+					skipped = append(skipped, fmt.Sprintf("relation %s: incompatible adopted target", r.Type))
 					continue
 				}
 			}
-			_ = tx.Link(local, model.Relation{From: model.EntryNode(local, e.ID), Type: r.Type, To: model.EntryNode(local, localTarget)})
+			if err = tx.Link(local, model.Relation{From: model.EntryNode(local, e.ID), Type: r.Type, To: model.EntryNode(local, localTarget)}); err != nil {
+				return err
+			}
 		}
 		links, err := tx.Relations(model.EntryNode(local, e.ID))
 		if err != nil {
@@ -284,7 +343,7 @@ func (s *Service) Adopt(ctx context.Context, cwd, entryID, selector string) (out
 		if err = tx.RecordAdoption(model.Adoption{ID: adoptID.String(), ProjectIdentity: g.Identity, SourceElephantID: src.SourceElephantID, SourceEntryID: remote.ID, LocalEntryID: e.ID, Kind: string(e.Kind), CreatedAt: now}); err != nil {
 			return err
 		}
-		out = AdoptResult{Entry: e, Relations: links, SourceElephantID: src.SourceElephantID, SourceEntryID: remote.ID}
+		out = AdoptResult{Entry: e, Relations: links, SourceElephantID: src.SourceElephantID, SourceEntryID: remote.ID, Skipped: skipped}
 		return nil
 	})
 	return
