@@ -13,6 +13,7 @@ import (
 
 	"elephant/internal/app"
 	"elephant/internal/model"
+	"elephant/internal/storage/zova"
 	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -222,5 +223,146 @@ func TestReceiveProcessAndRemoteRecall(t *testing.T) {
 	var local app.RecallResult
 	if err := json.Unmarshal(out.Bytes(), &local); err != nil || len(local.Decisions) != 0 {
 		t.Fatal(out.String(), err)
+	}
+}
+
+func TestSearchCLIFilters(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", cwd).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	database := filepath.Join(t.TempDir(), "searchcli.zova")
+	svc := func() *app.Service {
+		db, err := zova.Open(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return app.New(db)
+	}()
+	if _, err := svc.Add(ctx, cwd, model.Fact, app.CreateInput{Title: "Alpha gateway", Body: "cli filters"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Add(ctx, cwd, model.Decision, app.CreateInput{Title: "Beta gateway", Body: "cli filters"}); err != nil {
+		t.Fatal(err)
+	}
+	var out, logs bytes.Buffer
+	runOK := func(args []string) string {
+		out.Reset()
+		if err := run(ctx, args, &out, &logs); err != nil {
+			t.Fatalf("%v: %v %s", args, err, logs.String())
+		}
+		return out.String()
+	}
+	q := func(extra ...string) []string {
+		args := append([]string{"--db", database, "--cwd", cwd, "search", "--limit", "50"}, extra...)
+		return append(args, "gateway")
+	}
+	var all []struct {
+		Entry struct {
+			ID        string `json:"id"`
+			UpdatedAt string `json:"updated_at"`
+		} `json:"entry"`
+		Match []string `json:"match"`
+	}
+	if err := json.Unmarshal([]byte(runOK(q())), &all); err != nil || len(all) != 2 {
+		t.Fatalf("search: %d %v %s", len(all), err, out.String())
+	}
+	// Time filters compose with the text query.
+	betaStamp := strings.Replace(all[0].Entry.UpdatedAt, "+0000", "Z", 1)
+	alphaStamp := strings.Replace(all[1].Entry.UpdatedAt, "+0000", "Z", 1)
+	var newer []map[string]any
+	if err := json.Unmarshal([]byte(runOK(q("--updated-after", betaStamp))), &newer); err != nil || len(newer) != 1 {
+		t.Fatalf("updated-after: %d %v %s", len(newer), err, out.String())
+	}
+	var older []map[string]any
+	if err := json.Unmarshal([]byte(runOK(q("--updated-before", alphaStamp))), &older); err != nil || len(older) != 1 {
+		t.Fatalf("updated-before: %d %v %s", len(older), err, out.String())
+	}
+	// Kind and status filters still compose.
+	var onlyFacts []map[string]any
+	if err := json.Unmarshal([]byte(runOK(q("--kind", "fact"))), &onlyFacts); err != nil || len(onlyFacts) != 1 {
+		t.Fatalf("kind: %d %v %s", len(onlyFacts), err, out.String())
+	}
+	// Invalid RFC3339 is rejected as invalid input, not a server error.
+	out.Reset()
+	if err := run(ctx, q("--updated-after", "yesterday"), &out, &logs); err == nil {
+		t.Fatal("invalid time accepted")
+	}
+	// A commit bound that cannot be resolved to a Git commit fails loudly
+	// instead of silently matching nothing (this repo has no commits).
+	err := run(ctx, q("--commit-start", strings.Repeat("0", 40)), &out, &logs)
+	if err == nil {
+		t.Fatal("unresolvable commit bound accepted")
+	}
+	if !strings.Contains(err.Error(), "cannot be resolved") {
+		t.Fatalf("unclear error: %v", err)
+	}
+}
+
+// TestSearchCommitRangeOrderingCLI: reversed and divergent commit ranges are
+// clear invalid-input errors at the CLI boundary; forward and equal ranges
+// run unchanged.
+func TestSearchCommitRangeOrderingCLI(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", cwd).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	commit := func(msg string) string {
+		out, err := exec.Command("git", "-C", cwd, "-c", "user.name=T", "-c", "user.email=t@e.com",
+			"commit", "--allow-empty", "-qm", msg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+		out, err = exec.Command("git", "-C", cwd, "rev-parse", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatal(string(out), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	c1 := commit("c1")
+	c2 := commit("c2")
+	// Divergent commit: branch from c1 so neither c2 nor side contains the other.
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(string(out), err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if out, err := exec.Command("git", "-C", cwd, "checkout", "-q", "-b", "side", c1).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	side := commit("side")
+	if out, err := exec.Command("git", "-C", cwd, "checkout", "-q", branch).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	database := filepath.Join(t.TempDir(), "rangecli.zova")
+	q := func(flags ...string) []string {
+		return append([]string{"--db", database, "--cwd", cwd, "search", "--limit", "50"}, flags...)
+	}
+	var buf, logs bytes.Buffer
+	// Forward and equal ranges run.
+	if err := run(ctx, q("--commit-start", c1, "--commit-end", c2), &buf, &logs); err != nil {
+		t.Fatalf("forward range: %v", err)
+	}
+	if err := run(ctx, q("--commit-start", c2, "--commit-end", c2), &buf, &logs); err != nil {
+		t.Fatalf("equal range: %v", err)
+	}
+	// Reversed endpoints are invalid input with a clear message.
+	err = run(ctx, q("--commit-start", c2, "--commit-end", c1), &buf, &logs)
+	if err == nil {
+		t.Fatal("reversed range accepted")
+	}
+	if !strings.Contains(err.Error(), "reversed") {
+		t.Fatalf("unclear reversed error: %v", err)
+	}
+	// Divergent endpoints are invalid input with a clear message.
+	err = run(ctx, q("--commit-start", c2, "--commit-end", side), &buf, &logs)
+	if err == nil {
+		t.Fatal("divergent range accepted")
+	}
+	if !strings.Contains(err.Error(), "divergent") {
+		t.Fatalf("unclear divergent error: %v", err)
 	}
 }

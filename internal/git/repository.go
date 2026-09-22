@@ -208,6 +208,46 @@ func withoutRepositoryLocationEnv() []string {
 	return filtered
 }
 
+// ResolveCommit resolves rev to the full object name of the commit it names
+// in the repository at root. Any revision syntax Git understands is accepted,
+// including abbreviated object names, refs, and HEAD~n. An unknown revision
+// wraps ErrUnknownCommit.
+func ResolveCommit(ctx context.Context, root, rev string) (string, error) {
+	if strings.TrimSpace(rev) == "" {
+		return "", fmt.Errorf("%w: empty commit", ErrUnknownCommit)
+	}
+	out, err := runGit(ctx, root, "rev-parse", "--verify", rev+"^{commit}")
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("%w: %s", ErrUnknownCommit, rev)
+	}
+	return out, nil
+}
+
+// IsAncestor reports whether ancestor is an ancestor of commit or the same
+// commit, decided from the history reachable at root. Callers resolve both
+// sides with ResolveCommit first; an unexpected Git failure is returned
+// as-is.
+func IsAncestor(ctx context.Context, root, ancestor, commit string) (bool, error) {
+	if ancestor == commit {
+		return true, nil
+	}
+	if _, err := runGit(ctx, root, "merge-base", "--is-ancestor", ancestor, commit); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		// merge-base --is-ancestor exits 1 for "not an ancestor"; any other
+		// failure is a real Git error, not an answer.
+		if exitCode(err) != 1 {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 func isNotRepository(err error) bool {
 	var commandErr *commandError
 	if !errors.As(err, &commandErr) {

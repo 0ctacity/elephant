@@ -46,4 +46,6 @@ type Tx interface {
 	PutCheckpoint(model.Project, model.Checkpoint) error
 	GetCheckpoint(model.Project, string) (model.Checkpoint, error)
 	ListCheckpoints(model.Project, int, int) ([]model.Checkpoint, error)
+	Search(model.Project, model.SearchQuery) ([]model.Entry, error)
+	Incoming(string) ([]model.Relation, error)
 }
