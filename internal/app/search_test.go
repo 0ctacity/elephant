@@ -2,15 +2,18 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"elephant/internal/app"
 	"elephant/internal/model"
+	"elephant/internal/storage"
 	"elephant/internal/storage/zova"
 )
 
@@ -254,30 +257,240 @@ func TestSearchCommitRangeFilters(t *testing.T) {
 	if b.Entry.StartCommit == nil || *b.Entry.StartCommit != *end {
 		t.Fatalf("superseding entry should start at the boundary: %+v", b.Entry.StartCommit)
 	}
-	// commit-start pins the entry whose life began at that commit.
-	byStart, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: start})
-	if err != nil || len(byStart) != 1 || byStart[0].Entry.ID != a.Entry.ID {
-		t.Fatalf("commit-start: %+v %v", byStart, err)
+	// Range [start, *end] spans both entries: the superseded entry lives
+	// entirely inside it, the superseding entry starts exactly at its end
+	// bound (inclusive intersection).
+	ranged, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: start, CommitEnd: *end, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// commit-end pins entries closed at that commit.
-	byEnd, err := s.Search(ctx, cwd, app.SearchFilters{CommitEnd: *end})
-	if err != nil || len(byEnd) != 1 || byEnd[0].Entry.ID != a.Entry.ID {
-		t.Fatalf("commit-end: %+v %v", byEnd, err)
+	sameIDs(t, "range composition", ranged, a.Entry.ID, b.Entry.ID)
+	// Point range at the boundary commit: the superseded entry ends there
+	// (inclusive) and the superseding entry starts there (inclusive).
+	point, err := s.Search(ctx, cwd, app.SearchFilters{Commit: *end, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The bounds compose into a single-entry range query.
-	ranged, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: start, CommitEnd: *end})
-	if err != nil || len(ranged) != 1 || ranged[0].Entry.ID != a.Entry.ID {
-		t.Fatalf("range composition: %+v %v", ranged, err)
+	sameIDs(t, "boundary point", point, a.Entry.ID, b.Entry.ID)
+	// Point range at the original start: only the entry still spanning from
+	// there is active; the superseding entry starts strictly after it.
+	atStart, err := s.Search(ctx, cwd, app.SearchFilters{Commit: start, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The legacy commit filter matches either bound: the closed entry via
-	// end_commit and the superseding entry via start_commit.
-	either, err := s.Search(ctx, cwd, app.SearchFilters{Commit: *end})
-	if err != nil || len(either) != 2 {
-		t.Fatalf("commit either-bound: %+v %v", either, err)
+	sameIDs(t, "start point", atStart, a.Entry.ID)
+	// Open-ended lower bound drops nothing: neither entry ended before
+	// start (inclusive).
+	fromStart, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: start, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
 	}
+	sameIDs(t, "open-ended lower bound", fromStart, a.Entry.ID, b.Entry.ID)
 	// Match metadata explains the commit hit.
-	if m := byStart[0].Match; m == nil || !contains(m, "commit") {
+	if m := ranged[0].Match; m == nil || !contains(m, "commit") {
 		t.Fatalf("match metadata: %v", m)
+	}
+}
+
+// sameIDs asserts the search results carry exactly the wanted entry IDs
+// (order-insensitive: entries created in one transaction can share a
+// timestamp and then tie-break on opaque IDs).
+func sameIDs(t *testing.T, label string, res []app.SearchResult, want ...string) {
+	t.Helper()
+	if len(res) != len(want) {
+		t.Fatalf("%s: got %d results %v, want %d", label, len(res), searchIDs(t, res), len(want))
+	}
+	got := map[string]bool{}
+	for _, r := range res {
+		got[r.Entry.ID] = true
+	}
+	for _, id := range want {
+		if !got[id] {
+			t.Fatalf("%s: missing %s from %v", label, id, searchIDs(t, res))
+		}
+	}
+}
+
+// headSHA returns the current HEAD commit of cwd.
+func headSHA(t *testing.T, cwd string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(string(out), err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// rangeCommit records a file and returns the new HEAD commit.
+func rangeCommit(t *testing.T, cwd, name string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(cwd, name), []byte(name), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", cwd, "add", ".").CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	if out, err := exec.Command("git", "-C", cwd, "-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "-qm", name).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	return headSHA(t, cwd)
+}
+
+func searchIDs(t *testing.T, res []app.SearchResult) []string {
+	t.Helper()
+	ids := make([]string, 0, len(res))
+	for _, r := range res {
+		ids = append(ids, r.Entry.ID)
+	}
+	return ids
+}
+
+// TestSearchCommitRangeSemantics pins real Git range behaviour: a requested
+// range [start, end] (either bound optional, --commit a single-commit range)
+// selects entries whose recorded [start_commit, end_commit] interval
+// intersects it. Bounds are inclusive, compared by commit ancestry, and a
+// missing entry bound means unbounded (created before history / still open).
+// The range filter must compose before limit/offset pagination.
+func TestSearchCommitRangeSemantics(t *testing.T) {
+	ctx := context.Background()
+	cwd := searchRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "rangesem.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	// Linear history c1..c5; searchRepo already created c1.
+	c1 := headSHA(t, cwd)
+	c2 := rangeCommit(t, cwd, "c2")
+	c3 := rangeCommit(t, cwd, "c3")
+	c4 := rangeCommit(t, cwd, "c4")
+	c5 := rangeCommit(t, cwd, "c5")
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert entries with crafted commit intervals; all share one timestamp so
+	// ordering falls back to the documented id tie-break.
+	stamp := time.Now().UTC()
+	put := func(id string, start, end *string) {
+		t.Helper()
+		e := model.Entry{ID: id, Kind: model.Fact, Title: "Range " + id, Body: "commit range semantics", Status: "active",
+			StartCommit: start, EndCommit: end, CreatedAt: stamp, UpdatedAt: stamp}
+		if err := db.Transact(ctx, func(tx storage.Tx) error { return tx.Put(status.Project, e) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("inside", ptr(c2), ptr(c3))        // fully inside [c2,c4]
+	put("before", ptr(c1), ptr(c1))        // ended strictly before c2
+	put("after", ptr(c5), nil)             // started strictly after c4, still open
+	put("overlap-left", ptr(c1), ptr(c3))  // started before, closed inside
+	put("overlap-right", ptr(c3), ptr(c5)) // started inside, closed after
+	put("containing", ptr(c1), ptr(c5))    // spans the whole requested range
+	put("open", ptr(c3), nil)              // opened inside, never closed
+	put("touch-start", ptr(c1), ptr(c2))   // ends exactly at the start bound
+	put("touch-end", ptr(c4), ptr(c5))     // starts exactly at the end bound
+	put("unbounded", nil, nil)             // no recorded commits: spans everything
+	// Entry order within a page is updated_at DESC, id DESC; all timestamps are
+	// equal here, so ids order the matches: unbounded, touch-start, touch-end,
+	// overlap-right, overlap-left, open, inside, containing.
+	res, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: c2, CommitEnd: c4, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := searchIDs(t, res)
+	want := []string{"unbounded", "touch-start", "touch-end", "overlap-right", "overlap-left", "open", "inside", "containing"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("range c2..c4 = %v, want %v", got, want)
+	}
+	if m := res[0].Match; m == nil || !contains(m, "commit") {
+		t.Fatalf("match metadata: %v", m)
+	}
+	// The filter runs before pagination: offset skips matching entries.
+	page, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: c2, CommitEnd: c4, Limit: 50, Offset: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := searchIDs(t, page); strings.Join(ids, ",") != "inside,containing" {
+		t.Fatalf("offset past matches = %v, want [inside containing]", ids)
+	}
+	// A single-commit range selects entries active at that commit.
+	point, err := s.Search(ctx, cwd, app.SearchFilters{Commit: c3, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := searchIDs(t, point); strings.Join(ids, ",") != "unbounded,overlap-right,overlap-left,open,inside,containing" {
+		t.Fatalf("point c3 = %v", ids)
+	}
+	// Open-ended bounds each drop exactly the entries on the far side.
+	lower, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: c4, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := searchIDs(t, lower); strings.Join(ids, ",") != "unbounded,touch-end,overlap-right,open,containing,after" {
+		t.Fatalf("lower bound c4 = %v", ids)
+	}
+	upper, err := s.Search(ctx, cwd, app.SearchFilters{CommitEnd: c2, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := searchIDs(t, upper); strings.Join(ids, ",") != "unbounded,touch-start,overlap-left,inside,containing,before" {
+		t.Fatalf("upper bound c2 = %v", ids)
+	}
+}
+
+// TestSearchCommitRangeRequiresResolvableGitRange: requested bounds must
+// resolve to commits in this repository. An unresolvable bound is a clear
+// validation error, never a silent equality fallback on start_commit or
+// end_commit.
+func TestSearchCommitRangeRequiresResolvableGitRange(t *testing.T) {
+	ctx := context.Background()
+	cwd := searchRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "unresolved.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An entry whose recorded start commit is absent from this repository (an
+	// imported archive keeps foreign commits). Querying that exact string must
+	// fail instead of matching the row by equality.
+	foreign := strings.Repeat("ab", 20)
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		return tx.Put(status.Project, model.Entry{ID: "foreign", Kind: model.Fact, Title: "Foreign origin", Body: "imported commit", Status: "active", StartCommit: ptr(foreign), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		label string
+		f     app.SearchFilters
+	}{
+		{"unknown start", app.SearchFilters{CommitStart: foreign}},
+		{"unknown end", app.SearchFilters{CommitEnd: foreign}},
+		{"not a commit", app.SearchFilters{Commit: "not-a-commit"}},
+		{"unreachable revision", app.SearchFilters{CommitStart: "HEAD~99"}},
+		{"zero object", app.SearchFilters{CommitEnd: strings.Repeat("00000000000000000000000000000000000000000", 1)}},
+	}
+	for _, tc := range cases {
+		res, err := s.Search(ctx, cwd, tc.f)
+		if err == nil {
+			t.Fatalf("%s: expected error, got %d results", tc.label, len(res))
+		}
+		if !errors.Is(err, model.ErrInvalidInput) {
+			t.Fatalf("%s: not invalid input: %v", tc.label, err)
+		}
+		if !strings.Contains(err.Error(), "cannot be resolved") {
+			t.Fatalf("%s: unclear error: %v", tc.label, err)
+		}
+	}
+	// Resolvable revision syntax (refs, not just full SHAs) is accepted.
+	if res, err := s.Search(ctx, cwd, app.SearchFilters{CommitStart: "HEAD"}); err != nil || len(res) != 1 {
+		t.Fatalf("resolvable ref: %v %v", searchIDs(t, res), err)
 	}
 }
 

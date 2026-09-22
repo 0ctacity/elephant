@@ -55,18 +55,6 @@ func (t *transaction) Search(p model.Project, q model.SearchQuery) ([]model.Entr
 		sql += " AND target_version=?"
 		args = append(args, q.TargetVersion)
 	}
-	if q.Commit != "" {
-		sql += " AND (start_commit=? OR end_commit=?)"
-		args = append(args, q.Commit, q.Commit)
-	}
-	if q.CommitStart != "" {
-		sql += " AND start_commit=?"
-		args = append(args, q.CommitStart)
-	}
-	if q.CommitEnd != "" {
-		sql += " AND end_commit=?"
-		args = append(args, q.CommitEnd)
-	}
 	if q.UpdatedAfter != nil {
 		sql += " AND updated_at>=?"
 		args = append(args, stamp(*q.UpdatedAfter))

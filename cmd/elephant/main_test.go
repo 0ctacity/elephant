@@ -290,4 +290,13 @@ func TestSearchCLIFilters(t *testing.T) {
 	if err := run(ctx, q("--updated-after", "yesterday"), &out, &logs); err == nil {
 		t.Fatal("invalid time accepted")
 	}
+	// A commit bound that cannot be resolved to a Git commit fails loudly
+	// instead of silently matching nothing (this repo has no commits).
+	err := run(ctx, q("--commit-start", strings.Repeat("0", 40)), &out, &logs)
+	if err == nil {
+		t.Fatal("unresolvable commit bound accepted")
+	}
+	if !strings.Contains(err.Error(), "cannot be resolved") {
+		t.Fatalf("unclear error: %v", err)
+	}
 }

@@ -241,15 +241,6 @@ func (t *fakeTx) Search(p model.Project, q model.SearchQuery) ([]model.Entry, er
 		if q.TargetVersion != "" && (e.TargetVersion == nil || *e.TargetVersion != q.TargetVersion) {
 			continue
 		}
-		if q.Commit != "" && (e.StartCommit == nil || *e.StartCommit != q.Commit) && (e.EndCommit == nil || *e.EndCommit != q.Commit) {
-			continue
-		}
-		if q.CommitStart != "" && (e.StartCommit == nil || *e.StartCommit != q.CommitStart) {
-			continue
-		}
-		if q.CommitEnd != "" && (e.EndCommit == nil || *e.EndCommit != q.CommitEnd) {
-			continue
-		}
 		if q.UpdatedAfter != nil && e.UpdatedAt.Before(*q.UpdatedAfter) {
 			continue
 		}

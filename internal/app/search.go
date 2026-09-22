@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,8 +21,9 @@ type SearchResult struct {
 }
 
 // Search filters supported by CLI and MCP. Source selects a remote source
-// table; empty means the local project. CommitStart and CommitEnd match the
-// inclusive start/end bounds of an entry's commit range.
+// table; empty means the local project. Commit, CommitStart and CommitEnd
+// request an inclusive Git commit range resolved against the local
+// repository; Commit is the single-commit shorthand for a range of one.
 type SearchFilters struct {
 	Query         string
 	Kind          model.Kind
@@ -41,15 +43,158 @@ type SearchFilters struct {
 
 // Search runs deterministic text retrieval scoped to one project table.
 // searchPage is the bounded batch size used to walk a project table when a
-// filter that the store cannot apply (repository-relative file membership)
-// must run before pagination. The scan stops as soon as a full page of
-// matches is collected, so unfiltered queries pay no extra cost.
+// filter that the store cannot apply (repository-relative file membership,
+// commit-range ancestry) must run before pagination. The scan stops as soon
+// as a full page of matches is collected, so unfiltered queries pay no extra
+// cost.
 const searchPage = 40
 
+// commitRange is a requested commit interval with inclusive, optional
+// bounds, already resolved to full commit SHAs in the local repository.
+type commitRange struct {
+	start string // "" means unbounded below
+	end   string // "" means unbounded above
+}
+
+// commitMatcher decides whether an entry's recorded commit interval
+// intersects the requested range. Recorded-revision resolutions and ancestry
+// answers are cached so each distinct stored commit costs at most a few Git
+// calls per search.
+type commitMatcher struct {
+	root      string
+	requested commitRange
+	resolved  map[string]string // recorded revision -> full SHA, "" when absent
+	ancestor  map[string]bool   // "a\x00b" -> a is an ancestor of b
+}
+
+// newCommitMatcher resolves the commit filters against root. An unresolvable
+// bound is a validation error: a range endpoint is never silently downgraded
+// to an equality filter. It returns nil when no commit filter is set.
+func newCommitMatcher(ctx context.Context, root string, f SearchFilters) (*commitMatcher, error) {
+	// --commit C is the single-commit range [C, C]; an explicit
+	// --commit-start/--commit-end replaces that side of the range.
+	start, startLabel := f.CommitStart, "commit range start"
+	end, endLabel := f.CommitEnd, "commit range end"
+	if start == "" && f.Commit != "" {
+		start, startLabel = f.Commit, "commit"
+	}
+	if end == "" && f.Commit != "" {
+		end, endLabel = f.Commit, "commit"
+	}
+	if start == "" && end == "" {
+		return nil, nil
+	}
+	m := &commitMatcher{root: root, resolved: map[string]string{}, ancestor: map[string]bool{}}
+	for _, bound := range []struct {
+		label string
+		rev   string
+		dst   *string
+	}{
+		{startLabel, start, &m.requested.start},
+		{endLabel, end, &m.requested.end},
+	} {
+		if bound.rev == "" {
+			continue
+		}
+		sha, err := gitrepo.ResolveCommit(ctx, root, bound.rev)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if errors.Is(err, gitrepo.ErrUnknownCommit) {
+				return nil, fmt.Errorf("%w: %s %q cannot be resolved to a commit in this repository", model.ErrInvalidInput, bound.label, bound.rev)
+			}
+			return nil, err
+		}
+		*bound.dst = sha
+	}
+	return m, nil
+}
+
+// recordedSHA caches the full SHA of a stored commit, "" when this
+// repository does not carry it.
+func (m *commitMatcher) recordedSHA(ctx context.Context, rev string) (string, error) {
+	if sha, ok := m.resolved[rev]; ok {
+		return sha, nil
+	}
+	sha, err := gitrepo.ResolveCommit(ctx, m.root, rev)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if !errors.Is(err, gitrepo.ErrUnknownCommit) {
+			return "", err
+		}
+		sha = ""
+	}
+	m.resolved[rev] = sha
+	return sha, nil
+}
+
+// precedes reports whether a sits strictly before b on one line of history.
+// Commits on divergent histories do not precede each other.
+func (m *commitMatcher) precedes(ctx context.Context, a, b string) (bool, error) {
+	if a == b {
+		return false, nil
+	}
+	key := a + "\x00" + b
+	if known, ok := m.ancestor[key]; ok {
+		return known, nil
+	}
+	before, err := gitrepo.IsAncestor(ctx, m.root, a, b)
+	if err != nil {
+		return false, err
+	}
+	m.ancestor[key] = before
+	return before, nil
+}
+
+// matches reports whether the entry's recorded commit interval intersects the
+// requested range. An entry is excluded only when Git proves it lies entirely
+// outside: a missing bound (created before the repository had commits, or
+// still open), a bound this repository cannot read (an imported archive keeps
+// foreign commits), and commits on divergent histories cannot prove exclusion
+// and therefore keep the entry.
+func (m *commitMatcher) matches(ctx context.Context, e model.Entry) (bool, error) {
+	if m.requested.start != "" && e.EndCommit != nil && *e.EndCommit != "" {
+		end, err := m.recordedSHA(ctx, *e.EndCommit)
+		if err != nil {
+			return false, err
+		}
+		if end != "" {
+			// Ended strictly before the range started.
+			before, err := m.precedes(ctx, end, m.requested.start)
+			if err != nil {
+				return false, err
+			}
+			if before {
+				return false, nil
+			}
+		}
+	}
+	if m.requested.end != "" && e.StartCommit != nil && *e.StartCommit != "" {
+		start, err := m.recordedSHA(ctx, *e.StartCommit)
+		if err != nil {
+			return false, err
+		}
+		if start != "" {
+			// Started strictly after the range ended.
+			before, err := m.precedes(ctx, m.requested.end, start)
+			if err != nil {
+				return false, err
+			}
+			if before {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
 // Search runs deterministic text retrieval scoped to one project table.
-// The file filter composes before limit/offset pagination: matching entries
-// keep their position in the deterministic ordering instead of being lost
-// to a SQL page that was sliced before the filter ran.
+// The file and commit-range filters compose before limit/offset pagination:
+// matching entries keep their position in the deterministic ordering instead
+// of being lost to a SQL page that was sliced before the filter ran.
 func (s *Service) Search(ctx context.Context, cwd string, f SearchFilters) (out []SearchResult, err error) {
 	out = []SearchResult{}
 	if f.Kind != "" && f.Kind != model.Fact && f.Kind != model.Decision && f.Kind != model.Task {
@@ -78,6 +223,12 @@ func (s *Service) Search(ctx context.Context, cwd string, f SearchFilters) (out 
 	if err != nil {
 		return nil, err
 	}
+	// Resolve requested range bounds up front: an unresolvable bound must
+	// fail the query before any entry is examined.
+	matcher, err := newCommitMatcher(ctx, g.Root, f)
+	if err != nil {
+		return nil, err
+	}
 	err = s.store.Transact(ctx, func(tx storage.Tx) error {
 		local, err := resolve(tx, g)
 		if err != nil {
@@ -95,25 +246,40 @@ func (s *Service) Search(ctx context.Context, cwd string, f SearchFilters) (out 
 			}
 		}
 		// getMatches returns one bounded page of entries, applying the file
-		// membership filter in the app layer where the store cannot. The
-		// second result reports whether the underlying store page was the
-		// last one (fewer than searchPage rows), which terminates the walk.
+		// membership filter and the commit-range filter in the app layer
+		// where the store cannot (relations and Git ancestry live outside
+		// SQL). The second result reports whether the underlying store page
+		// was the last one (fewer than searchPage rows), which terminates
+		// the walk.
 		getMatches := func(offset int) ([]model.Entry, bool, error) {
 			entries, err := tx.Search(project, model.SearchQuery{
 				Query: f.Query, Kind: f.Kind, Status: f.Status, Actor: f.Actor,
-				TargetVersion: f.TargetVersion, Commit: f.Commit, CommitStart: f.CommitStart, CommitEnd: f.CommitEnd,
-				UpdatedAfter: f.UpdatedAfter, UpdatedBefore: f.UpdatedBefore,
+				TargetVersion: f.TargetVersion,
+				UpdatedAfter:  f.UpdatedAfter, UpdatedBefore: f.UpdatedBefore,
 				Limit: searchPage, Offset: offset,
 			})
 			if err != nil {
 				return nil, false, err
 			}
 			exhausted := len(entries) < searchPage
-			if cleanFile == "" {
+			if cleanFile == "" && matcher == nil {
 				return entries, exhausted, nil
 			}
 			filtered := make([]model.Entry, 0, len(entries))
 			for _, e := range entries {
+				if matcher != nil {
+					keep, err := matcher.matches(ctx, e)
+					if err != nil {
+						return nil, false, err
+					}
+					if !keep {
+						continue
+					}
+				}
+				if cleanFile == "" {
+					filtered = append(filtered, e)
+					continue
+				}
 				links, err := tx.Relations(model.EntryNode(project, e.ID))
 				if err != nil {
 					return nil, false, err
@@ -129,7 +295,7 @@ func (s *Service) Search(ctx context.Context, cwd string, f SearchFilters) (out 
 		}
 		// Pagination always applies to the filtered stream: offset skips
 		// matching entries, limit bounds returned matches, regardless of
-		// whether the file filter narrowed the store rows first.
+		// whether the app-layer filters narrowed the store rows first.
 		skip := f.Offset
 		collected := 0
 		offset := 0
