@@ -139,7 +139,20 @@ func (s *Service) Export(ctx context.Context, cwd string) (out ExportEnvelope, e
 		if err != nil {
 			return err
 		}
+		// Sources() spans every project in the database. Only this exported
+		// project's source tables drive receipt collection, and each source
+		// Elephant is queried once: the same Elephant can exist as a source
+		// table under several project identities, and re-querying would
+		// duplicate this project's receipts in the envelope.
+		seenSources := map[string]bool{}
 		for _, src := range sources {
+			if src.Identity != local.Identity {
+				continue
+			}
+			if seenSources[src.SourceElephantID] {
+				continue
+			}
+			seenSources[src.SourceElephantID] = true
 			receipts, err := tx.AdoptionsBySource(g.Identity, src.SourceElephantID)
 			if err != nil {
 				return err

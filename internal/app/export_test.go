@@ -17,6 +17,7 @@ import (
 
 	"elephant/internal/app"
 	"elephant/internal/model"
+	"elephant/internal/storage"
 	"elephant/internal/storage/zova"
 )
 
@@ -518,4 +519,112 @@ func TestExportRejectsNonRepository(t *testing.T) {
 		t.Fatal("export outside a repository accepted")
 	}
 	_ = errors.Is
+}
+
+// TestExportEmitsEachAdoptionReceiptOnceAcrossProjects: tx.Sources() spans
+// every project in the database, so a source Elephant that exists under
+// several project identities must not make export query the exported
+// project's receipts repeatedly. Each receipt appears exactly once, foreign
+// project receipts never leak, and the envelope's own output imports.
+func TestExportEmitsEachAdoptionReceiptOnceAcrossProjects(t *testing.T) {
+	ctx := context.Background()
+	cwdA := exportRepo(t) // identity github.com/test/portable
+	// Second project with a different identity in the same database.
+	cwdB := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", cwdB},
+		{"-C", cwdB, "remote", "add", "origin", "https://github.com/test/multi-b.git"},
+		{"-C", cwdB, "-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "--allow-empty", "-qm", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+	}
+	db, err := zova.Open(filepath.Join(t.TempDir(), "multiproj.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	localTask, err := s.Add(ctx, cwdA, model.Task, app.CreateInput{Title: "Local", Body: "exported"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignTask, err := s.Add(ctx, cwdB, model.Task, app.CreateInput{Title: "Foreign", Body: "other project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusA, err := s.Status(ctx, cwdA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusB, err := s.Status(ctx, cwdB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := func() string { return uuid.Must(uuid.NewV7()).String() }
+	// The same source Elephant is registered under both projects.
+	elephant := id()
+	now := time.Now().UTC()
+	receipt := model.Adoption{ID: id(), ProjectIdentity: statusA.Project.Identity, SourceElephantID: elephant, SourceEntryID: id(), LocalEntryID: localTask.Entry.ID, Kind: "task", CreatedAt: now}
+	foreignReceipt := model.Adoption{ID: id(), ProjectIdentity: statusB.Project.Identity, SourceElephantID: elephant, SourceEntryID: id(), LocalEntryID: foreignTask.Entry.ID, Kind: "task", CreatedAt: now}
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		if _, err := tx.EnsureSource(statusA.Project, elephant); err != nil {
+			return err
+		}
+		if _, err := tx.EnsureSource(statusB.Project, elephant); err != nil {
+			return err
+		}
+		if err := tx.RecordAdoption(receipt); err != nil {
+			return err
+		}
+		return tx.RecordAdoption(foreignReceipt)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := s.Export(ctx, cwdA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, a := range env.Adoptions {
+		if a.ID == receipt.ID {
+			count++
+		}
+		if a.ProjectIdentity != statusA.Project.Identity {
+			t.Fatalf("foreign project receipt leaked: %+v", a)
+		}
+		if a.ID == foreignReceipt.ID {
+			t.Fatalf("foreign project receipt exported: %+v", a)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("receipt exported %d times, want exactly once (%d total adoptions)", count, len(env.Adoptions))
+	}
+	// The envelope's own output imports successfully: duplicate receipts in
+	// the archive would fail strict validation.
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := s.Import(ctx, raw, "roundtrip")
+	if err != nil {
+		t.Fatalf("export did not round-trip: %v", err)
+	}
+	archived, err := func() ([]model.Adoption, error) {
+		var out []model.Adoption
+		err := db.Transact(ctx, func(tx storage.Tx) error {
+			var err error
+			out, err = tx.ArchivedAdoptions(src.TableName)
+			return err
+		})
+		return out, err
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archived) != 1 || archived[0].ID != receipt.ID {
+		t.Fatalf("imported receipts: got %d, want exactly the one exported receipt", len(archived))
+	}
 }
