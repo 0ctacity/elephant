@@ -108,6 +108,11 @@ func (s *Service) Review(ctx context.Context, cwd string, opts *ReviewOptions) (
 			return err
 		}
 		for _, src := range sources {
+			if src.Identity != local.Identity {
+				// Sources() spans every project in the database: a source
+				// table belongs only to the review of its own project.
+				continue
+			}
 			if src.SourceElephantID == "" {
 				continue
 			}
@@ -138,14 +143,19 @@ func (s *Service) Review(ctx context.Context, cwd string, opts *ReviewOptions) (
 				if e.Kind == model.Fact && e.Status == "active" {
 					// Verification comes from evidence records, not the
 					// entry timestamp: editing a row does not re-verify a
-					// fact, and stale evidence stays flagged on a fresh row.
-					var verified time.Time
-					for _, ev := range evidence {
-						if ev.VerifiedAt.After(verified) {
-							verified = ev.VerifiedAt
+					// fact, and stale evidence stays flagged on a fresh
+					// row. A fact with no evidence at all measures from
+					// CreatedAt so a new fact is not flagged immediately.
+					baseline := e.CreatedAt
+					if len(evidence) > 0 {
+						baseline = time.Time{}
+						for _, ev := range evidence {
+							if ev.VerifiedAt.After(baseline) {
+								baseline = ev.VerifiedAt
+							}
 						}
 					}
-					if verified.IsZero() || now.Sub(verified) > time.Duration(o.UnverifiedFactDays)*24*time.Hour {
+					if baseline.IsZero() || now.Sub(baseline) > time.Duration(o.UnverifiedFactDays)*24*time.Hour {
 						out = append(out, ReviewFinding{Code: CodeUnverifiedFact, Severity: "low", Source: t.source, EntryID: e.ID, Detail: fmt.Sprintf("fact %s has no evidence verification for %d days", e.ID, o.UnverifiedFactDays), Action: "verify the fact explicitly or retire it"})
 					}
 				}

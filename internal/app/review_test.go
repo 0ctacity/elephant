@@ -371,6 +371,156 @@ func TestReviewsImportedSourcesWithoutRemotes(t *testing.T) {
 	}
 }
 
+// TestReviewsOnlyCurrentProjectSources: tx.Sources() spans every project in
+// the database. Review must only scan source tables whose project identity
+// matches the current repository, so entries and findings from unrelated
+// projects never appear.
+func TestReviewsOnlyCurrentProjectSources(t *testing.T) {
+	ctx := context.Background()
+	cwd := reviewRepo(t)
+	// Second repository with a different identity in the same database.
+	other := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", other},
+		{"-C", other, "remote", "add", "origin", "https://github.com/test/review-foreign.git"},
+		{"-C", other, "-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "--allow-empty", "-qm", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+	}
+	db, err := zova.Open(filepath.Join(t.TempDir(), "multiproject.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherStatus, err := s.Status(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherStatus.Project.Identity == status.Project.Identity {
+		t.Fatal("test setup: identities collide")
+	}
+	now := time.Now().UTC()
+	old := now.Add(-40 * 24 * time.Hour)
+	const foreignID = "foreign-project-task"
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		// A source table registered under the OTHER project's identity.
+		src, err := tx.EnsureSource(otherStatus.Project, "foreign-elephant")
+		if err != nil {
+			return err
+		}
+		e := model.Entry{ID: foreignID, ActorID: "tester", Kind: model.Task, Title: "Foreign", Body: "belongs elsewhere", Status: "open", CreatedAt: old, UpdatedAt: old}
+		return tx.Put(src, e)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Review from this repository: foreign entries and findings never appear.
+	findings, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.EntryID == foreignID {
+			t.Fatalf("foreign project entry reviewed: %+v", f)
+		}
+		if f.Source == "remote:foreign-elephant" {
+			t.Fatalf("foreign project source reviewed: %+v", f)
+		}
+	}
+	// The owning repository still reviews its own source table: scoping by
+	// identity, not omission.
+	own, err := s.Review(ctx, other, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range own {
+		if f.Code == app.CodeStaleTask && f.Source == "remote:foreign-elephant" && f.EntryID == foreignID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("owning repository does not review its source: %+v", own)
+	}
+}
+
+// TestReviewUnverifiedFactMeasurement: a fact with evidence measures from the
+// newest VerifiedAt; a fact with no evidence at all measures from CreatedAt.
+// A new fact is therefore not flagged immediately, while an old unverified
+// fact and stale evidence both stay flagged.
+func TestReviewUnverifiedFactMeasurement(t *testing.T) {
+	ctx := context.Background()
+	cwd := reviewRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "unverifiedwindow.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	mkFact := func(title string, created time.Time, verified *time.Time) string {
+		id := uuid.Must(uuid.NewV7()).String()
+		if err := db.Transact(ctx, func(tx storage.Tx) error {
+			e := model.Entry{ID: id, ActorID: "tester", Kind: model.Fact, Title: title, Body: "window", Status: "active", CreatedAt: created, UpdatedAt: created}
+			if err := tx.Put(status.Project, e); err != nil {
+				return err
+			}
+			if verified != nil {
+				return tx.PutEvidence(status.Project, model.Evidence{ID: uuid.Must(uuid.NewV7()).String(), EntryID: id, Path: "evidence.txt", Commit: strings.Repeat("f", 40), Blob: "deadbeef", CreatedAt: *verified, VerifiedAt: *verified})
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	recent := now
+	stale := now.Add(-200 * day)
+	freshNoEvidence := mkFact("New fact", now, nil)
+	oldNoEvidence := mkFact("Old fact", now.Add(-200*day), nil)
+	recentEvidence := mkFact("Old with fresh evidence", now.Add(-200*day), &recent)
+	staleEvidence := mkFact("Fresh with stale evidence", now.Add(-day), &stale)
+	// Default threshold: 90 unverified-fact days.
+	findings, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagged := map[string]bool{}
+	for _, f := range findings {
+		if f.Code == app.CodeUnverifiedFact {
+			flagged[f.EntryID] = true
+		}
+	}
+	// New fact without evidence: measured from CreatedAt, within the window.
+	if flagged[freshNoEvidence] {
+		t.Fatal("new fact without evidence reported immediately")
+	}
+	// Old fact without evidence: measured from CreatedAt, past the window.
+	if !flagged[oldNoEvidence] {
+		t.Fatal("old fact without evidence not flagged")
+	}
+	// Evidence verified recently on an old fact: measured from VerifiedAt.
+	if flagged[recentEvidence] {
+		t.Fatal("fact with recent evidence verification flagged")
+	}
+	// Evidence verified long ago on a fresh fact: measured from VerifiedAt.
+	if !flagged[staleEvidence] {
+		t.Fatal("fact with stale evidence verification not flagged")
+	}
+}
+
 // reviewState is the storage state Review must never change.
 type reviewState struct {
 	Entries   []model.Entry
