@@ -18,11 +18,11 @@ func TestNormalizeRemoteEquivalentForms(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "scp", raw: "git@github.com:0ctacity/solo.git", want: "github.com/0ctacity/solo"},
-		{name: "scp without user", raw: "github.com:0ctacity/solo.git", want: "github.com/0ctacity/solo"},
-		{name: "https", raw: "https://github.com/0ctacity/solo.git", want: "github.com/0ctacity/solo"},
-		{name: "ssh url", raw: "ssh://git@github.com/0ctacity/solo.git", want: "github.com/0ctacity/solo"},
-		{name: "trailing slash", raw: "https://github.com/0ctacity/solo.git/", want: "github.com/0ctacity/solo"},
+		{name: "scp", raw: "git@github.com:octacity-org/solo.git", want: "github.com/octacity-org/solo"},
+		{name: "scp without user", raw: "github.com:octacity-org/solo.git", want: "github.com/octacity-org/solo"},
+		{name: "https", raw: "https://github.com/octacity-org/solo.git", want: "github.com/octacity-org/solo"},
+		{name: "ssh url", raw: "ssh://git@github.com/octacity-org/solo.git", want: "github.com/octacity-org/solo"},
+		{name: "trailing slash", raw: "https://github.com/octacity-org/solo.git/", want: "github.com/octacity-org/solo"},
 	}
 
 	for _, tt := range tests {

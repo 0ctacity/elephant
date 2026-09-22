@@ -9,20 +9,20 @@ It stores facts, decisions, tasks, and explicit file relationships in one `eleph
 Once the installer is published on `main` and a stable GitHub release is available:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/0ctacity/elephant/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/octacity-org/elephant/main/install.sh | sh
 ```
 
 To install a specific release, including a prerelease:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/0ctacity/elephant/main/install.sh | sh -s -- --version 1.0.0-rc.1
+curl -fsSL https://raw.githubusercontent.com/octacity-org/elephant/main/install.sh | sh -s -- --version 0.2.0
 ```
 
-The installer detects Linux ARM64/AMD64, macOS ARM64, or Windows AMD64 under Git Bash. It downloads the matching archive from `0ctacity/elephant`, verifies it against the release's `SHA256SUMS.txt`, then replaces the executable in `~/.local/bin`. It does not use sudo, modify shell configuration, or configure MCP. If that directory is outside your PATH, add it to your PATH or invoke the installed binary by its full path.
+The installer detects Linux ARM64/AMD64, macOS ARM64, or Windows AMD64 under Git Bash. It downloads the matching archive from `octacity-org/elephant`, verifies it against the release's `SHA256SUMS.txt`, then replaces the executable in `~/.local/bin`. It does not use sudo, modify shell configuration, or configure MCP. If that directory is outside your PATH, add it to your PATH or invoke the installed binary by its full path.
 
 Pass `--dir /your/bin/directory` to choose another destination, or set `ELEPHANT_INSTALL_DIR`. Running the installer again upgrades to the selected release. `--repo OWNER/REPO` (or `ELEPHANT_REPO`) supports forks. The default selects the latest **stable** release; use `--version` while only release candidates exist.
 
-Requirements: `curl`, `tar` (or `unzip` for Windows), and `sha256sum` or `shasum`. Git is required when using Elephant with repositories. Go, Zig, and a separate Zova installation are unnecessary for release binaries. On Windows without Git Bash, download and extract the AMD64 ZIP from [GitHub releases](https://github.com/0ctacity/elephant/releases).
+Requirements: `curl`, `tar` (or `unzip` for Windows), and `sha256sum` or `shasum`. Git is required when using Elephant with repositories. Go, Zig, and a separate Zova installation are unnecessary for release binaries. On Windows without Git Bash, download and extract the AMD64 ZIP from [GitHub releases](https://github.com/octacity-org/elephant/releases).
 
 You can download and inspect `install.sh` before executing it. Installation does not start Elephant or migrate a database; the database is opened when you run Elephant.
 

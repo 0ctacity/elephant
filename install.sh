@@ -7,15 +7,15 @@ usage() {
     cat <<'USAGE'
 Usage: sh install.sh [--repo OWNER/REPO] [--version VERSION] [--dir DIRECTORY]
 
-Defaults: 0ctacity/elephant; latest stable release; $HOME/.local/bin.
-Use --version 1.0.0-rc.1 to select a prerelease explicitly.
+Defaults: octacity-org/elephant; latest stable release; $HOME/.local/bin.
+Use --version 0.2.0 to select a specific release explicitly.
 ELEPHANT_REPO and ELEPHANT_INSTALL_DIR can also set the repository and directory.
 Windows users need Git Bash (with curl and unzip) or can extract the release ZIP.
 USAGE
 }
 
 main() {
-    repo=${ELEPHANT_REPO:-0ctacity/elephant}
+    repo=${ELEPHANT_REPO:-octacity-org/elephant}
     version=latest
     install_dir=${ELEPHANT_INSTALL_DIR:-${HOME:?HOME is not set}/.local/bin}
     while [ "$#" -gt 0 ]; do
