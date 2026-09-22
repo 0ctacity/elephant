@@ -10,6 +10,7 @@ import (
 // Store serializes a complete operation in a transaction, including graph edits.
 type Store interface {
 	Transact(context.Context, func(Tx) error) error
+	Backup(string) error
 }
 type Tx interface {
 	Identity() (string, error)
@@ -33,6 +34,11 @@ type Tx interface {
 	RecordAdoption(model.Adoption) error
 	Adoption(projectIdentity, sourceElephantID, sourceEntryID string) (model.Adoption, error)
 	AdoptionsBySource(projectIdentity, sourceElephantID string) ([]model.Adoption, error)
+	// Archived adoption receipts belong to one imported archive table. They
+	// stay outside the live registry so an import can never satisfy, shadow,
+	// or alter a local adoption.
+	RecordArchivedAdoption(archiveTable string, a model.Adoption) error
+	ArchivedAdoptions(archiveTable string) ([]model.Adoption, error)
 	PutEvidence(model.Project, model.Evidence) error
 	Evidence(model.Project, string) ([]model.Evidence, error)
 	EvidenceByID(model.Project, string) (model.Evidence, error)

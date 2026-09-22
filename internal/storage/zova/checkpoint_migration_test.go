@@ -60,8 +60,8 @@ func TestSchemaThreeCheckpointMigration(t *testing.T) {
 		}
 		err = s.Transact(context.Background(), func(tx storage.Tx) error {
 			rows, err := tx.(*transaction).query("SELECT value FROM elephant_meta WHERE key='schema_version'")
-			if err != nil || len(rows) != 1 || value(rows[0][0]) != "4" {
-				return errors.New("migration did not persist schema 4")
+			if err != nil || len(rows) != 1 || value(rows[0][0]) != "5" {
+				return errors.New("migration did not persist schema 5")
 			}
 			p, err := tx.Project("example.org/team/v3")
 			if err != nil {
@@ -112,7 +112,7 @@ func TestCheckpointMigrationRollbackLeavesV3Readable(t *testing.T) {
 		t.Fatalf("rolled-back database no longer opens: %v", err)
 	}
 	opened.Close()
-	if got := schemaVersion(t, path); got != "4" {
+	if got := schemaVersion(t, path); got != "5" {
 		t.Fatalf("recovery migration reached %q", got)
 	}
 }

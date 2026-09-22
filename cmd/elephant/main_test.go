@@ -45,6 +45,61 @@ func TestVersionAndCLI(t *testing.T) {
 		t.Fatal(out.String())
 	}
 }
+func TestExportImportBackupCLI(t *testing.T) {
+	cwd := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", cwd},
+		{"-C", cwd, "remote", "add", "origin", "https://github.com/test/cli-portable.git"},
+		{"-C", cwd, "-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "--allow-empty", "-qm", "init"},
+	} {
+		if b, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatal(string(b), err)
+		}
+	}
+	t.Setenv("ELEPHANT_DB", filepath.Join(t.TempDir(), "cli-portable.zova"))
+	ctx := context.Background()
+	var out, logs bytes.Buffer
+	if err := run(ctx, []string{"--cwd", cwd, "add", "fact", "--title", "Portable", "--body", "Round trip"}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	runExport := func() string {
+		t.Helper()
+		out.Reset()
+		if err := run(ctx, []string{"--cwd", cwd, "export"}, &out, &logs); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	first, second := runExport(), runExport()
+	if first != second || !json.Valid([]byte(first)) {
+		t.Fatal("export is not deterministic")
+	}
+	archive := filepath.Join(t.TempDir(), "archive.json")
+	if err := os.WriteFile(archive, []byte(first), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(ctx, []string{"--cwd", cwd, "import", "--as-remote", "cli", archive}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(ctx, []string{"--cwd", cwd, "import", "--as-remote", "cli", archive}, &out, &logs); err != nil {
+		t.Fatalf("reimport must be idempotent: %v", err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.zova")
+	out.Reset()
+	if err := run(ctx, []string{"backup", "--output", backup}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(ctx, []string{"--db", backup, "--cwd", cwd, "recall"}, &out, &logs); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Portable") {
+		t.Fatalf("restored database lost entries: %s", out.String())
+	}
+}
+
 func TestStdioProcess(t *testing.T) {
 	if os.Getenv("ELEPHANT_TEST_PROCESS") == "1" {
 		if err := run(context.Background(), []string{"serve"}, os.Stdout, os.Stderr); err != nil {

@@ -81,8 +81,8 @@ func TestSchemaTwoEvidenceMigration(t *testing.T) {
 		}
 		err = s.Transact(context.Background(), func(tx storage.Tx) error {
 			rows, err := tx.(*transaction).query("SELECT value FROM elephant_meta WHERE key='schema_version'")
-			if err != nil || len(rows) != 1 || value(rows[0][0]) != "4" {
-				return errors.New("migration did not persist schema 4")
+			if err != nil || len(rows) != 1 || value(rows[0][0]) != "5" {
+				return errors.New("migration did not persist schema 5")
 			}
 			rows, err = tx.(*transaction).query("SELECT id FROM p_0123456789abcdef0123456789abcdef_evidence")
 			if err != nil {
@@ -109,7 +109,7 @@ func TestSchemaTwoEvidenceMigration(t *testing.T) {
 			t.Fatalf("attempt %d: %v", attempt, err)
 		}
 	}
-	if got := schemaVersion(t, path); got != "4" {
+	if got := schemaVersion(t, path); got != "5" {
 		t.Fatalf("version=%q", got)
 	}
 }
@@ -143,7 +143,7 @@ func TestEvidenceMigrationRollbackLeavesV2Readable(t *testing.T) {
 		t.Fatalf("rolled-back database no longer opens: %v", err)
 	}
 	opened.Close()
-	if got := schemaVersion(t, path); got != "4" {
+	if got := schemaVersion(t, path); got != "5" {
 		t.Fatalf("recovery migration reached %q", got)
 	}
 }

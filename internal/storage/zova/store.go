@@ -67,10 +67,13 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 				if err := db.CreateGraph(graph); err != nil {
 					return err
 				}
-				return t.migrate()
+				if err := t.migrate(); err != nil {
+					return err
+				}
+				return t.migrateCheckpointKeys()
 			}
 			rows, err := t.query("SELECT value FROM elephant_meta WHERE key='schema_version'")
-			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2" && value(rows[0][0]) != "3" && value(rows[0][0]) != "4") {
+			if err != nil || len(rows) != 1 || (value(rows[0][0]) != "1" && value(rows[0][0]) != "2" && value(rows[0][0]) != "3" && value(rows[0][0]) != "4" && value(rows[0][0]) != "5") {
 				return model.ErrSchema
 			}
 			has, err := db.HasGraph(graph)
@@ -82,14 +85,25 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 			}
 			switch value(rows[0][0]) {
 			case "1":
-				return t.migrate()
+				if err := t.migrate(); err != nil {
+					return err
+				}
+				return t.migrateCheckpointKeys()
 			case "2":
 				if err := t.migrateEvidence(); err != nil {
 					return err
 				}
-				return t.migrateCheckpoints()
+				if err := t.migrateCheckpoints(); err != nil {
+					return err
+				}
+				return t.migrateCheckpointKeys()
 			case "3":
-				return t.migrateCheckpoints()
+				if err := t.migrateCheckpoints(); err != nil {
+					return err
+				}
+				return t.migrateCheckpointKeys()
+			case "4":
+				return t.migrateCheckpointKeys()
 			}
 			return nil
 		})
@@ -101,6 +115,17 @@ INSERT INTO elephant_meta VALUES('schema_version','1');`); err != nil {
 	return s, nil
 }
 func (s *Store) Close() error { s.mu.Lock(); defer s.mu.Unlock(); return s.db.Close() }
+
+// Backup creates a storage-safe consistent snapshot at dest while the database
+// remains open.
+func (s *Store) Backup(dest string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.db.BackupTo(dest); err != nil {
+		return fmt.Errorf("%w: %w", model.ErrStorage, err)
+	}
+	return nil
+}
 func (s *Store) Transact(ctx context.Context, fn func(storage.Tx) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
