@@ -108,6 +108,25 @@ func newCommitMatcher(ctx context.Context, root string, f SearchFilters) (*commi
 		}
 		*bound.dst = sha
 	}
+	// The range must run forward: the start bound has to be equal to or an
+	// ancestor of the end bound. Reversed or divergent endpoints cannot
+	// define an interval and are a clear validation error.
+	if m.requested.start != "" && m.requested.end != "" {
+		forward, err := gitrepo.IsAncestor(ctx, root, m.requested.start, m.requested.end)
+		if err != nil {
+			return nil, err
+		}
+		if !forward {
+			reversed, err := gitrepo.IsAncestor(ctx, root, m.requested.end, m.requested.start)
+			if err != nil {
+				return nil, err
+			}
+			if reversed {
+				return nil, fmt.Errorf("%w: commit range is reversed: start %q is a descendant of end %q", model.ErrInvalidInput, start, end)
+			}
+			return nil, fmt.Errorf("%w: commit range endpoints %q and %q are on divergent histories", model.ErrInvalidInput, start, end)
+		}
+	}
 	return m, nil
 }
 

@@ -69,7 +69,7 @@ type historyInput struct {
 }
 
 func registerSearch(s *sdk.Server, service *app.Service, cwd func(string) string) {
-	register(s, "search_entries", "Deterministic text search with composable filters and match metadata; project-scoped with stable ordering. updated_after/updated_before take RFC3339 timestamps. commit/commit_start/commit_end request an inclusive Git commit range resolved in the local repository (entries match when their recorded commit interval intersects it), and an unresolvable bound is an invalid-input error.", func(ctx context.Context, in searchInput) ([]app.SearchResult, error) {
+	register(s, "search_entries", "Deterministic text search with composable filters and match metadata; project-scoped with stable ordering. updated_after/updated_before take RFC3339 timestamps. commit/commit_start/commit_end request an inclusive Git commit range resolved in the local repository (entries match when their recorded commit interval intersects it); an unresolvable bound, reversed endpoints, or endpoints on divergent histories are invalid-input errors.", func(ctx context.Context, in searchInput) ([]app.SearchResult, error) {
 		after, before, err := parseTimeFilters(in.UpdatedAfter, in.UpdatedBefore)
 		if err != nil {
 			return nil, err

@@ -300,3 +300,69 @@ func TestSearchCLIFilters(t *testing.T) {
 		t.Fatalf("unclear error: %v", err)
 	}
 }
+
+// TestSearchCommitRangeOrderingCLI: reversed and divergent commit ranges are
+// clear invalid-input errors at the CLI boundary; forward and equal ranges
+// run unchanged.
+func TestSearchCommitRangeOrderingCLI(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", cwd).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	commit := func(msg string) string {
+		out, err := exec.Command("git", "-C", cwd, "-c", "user.name=T", "-c", "user.email=t@e.com",
+			"commit", "--allow-empty", "-qm", msg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v", out, err)
+		}
+		out, err = exec.Command("git", "-C", cwd, "rev-parse", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatal(string(out), err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	c1 := commit("c1")
+	c2 := commit("c2")
+	// Divergent commit: branch from c1 so neither c2 nor side contains the other.
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(string(out), err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if out, err := exec.Command("git", "-C", cwd, "checkout", "-q", "-b", "side", c1).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	side := commit("side")
+	if out, err := exec.Command("git", "-C", cwd, "checkout", "-q", branch).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	database := filepath.Join(t.TempDir(), "rangecli.zova")
+	q := func(flags ...string) []string {
+		return append([]string{"--db", database, "--cwd", cwd, "search", "--limit", "50"}, flags...)
+	}
+	var buf, logs bytes.Buffer
+	// Forward and equal ranges run.
+	if err := run(ctx, q("--commit-start", c1, "--commit-end", c2), &buf, &logs); err != nil {
+		t.Fatalf("forward range: %v", err)
+	}
+	if err := run(ctx, q("--commit-start", c2, "--commit-end", c2), &buf, &logs); err != nil {
+		t.Fatalf("equal range: %v", err)
+	}
+	// Reversed endpoints are invalid input with a clear message.
+	err = run(ctx, q("--commit-start", c2, "--commit-end", c1), &buf, &logs)
+	if err == nil {
+		t.Fatal("reversed range accepted")
+	}
+	if !strings.Contains(err.Error(), "reversed") {
+		t.Fatalf("unclear reversed error: %v", err)
+	}
+	// Divergent endpoints are invalid input with a clear message.
+	err = run(ctx, q("--commit-start", c2, "--commit-end", side), &buf, &logs)
+	if err == nil {
+		t.Fatal("divergent range accepted")
+	}
+	if !strings.Contains(err.Error(), "divergent") {
+		t.Fatalf("unclear divergent error: %v", err)
+	}
+}

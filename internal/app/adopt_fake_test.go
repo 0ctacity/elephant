@@ -64,8 +64,6 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore { return &fakeStore{state: newFakeState()} }
 
-func (f *fakeStore) Backup(string) error { return nil }
-
 func (f *fakeStore) Transact(ctx context.Context, fn func(storage.Tx) error) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

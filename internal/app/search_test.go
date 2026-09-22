@@ -311,6 +311,68 @@ func sameIDs(t *testing.T, label string, res []app.SearchResult, want ...string)
 	}
 }
 
+// mustGit runs git in cwd and fails the test on error.
+func mustGit(t *testing.T, cwd string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", cwd}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatal(string(out), err)
+	}
+	return string(out)
+}
+
+// TestSearchCommitRangeEndpointOrdering: commit-start must be equal to or an
+// ancestor of commit-end. Reversed and divergent endpoints are clear
+// validation errors, never accepted as an empty or equality filter.
+func TestSearchCommitRangeEndpointOrdering(t *testing.T) {
+	ctx := context.Background()
+	cwd := searchRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "rangeorder.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	c1 := headSHA(t, cwd)
+	c2 := rangeCommit(t, cwd, "c2")
+	// Divergent commit: branch from c1 so neither c2 nor side contains the other.
+	branch := strings.TrimSpace(mustGit(t, cwd, "rev-parse", "--abbrev-ref", "HEAD"))
+	mustGit(t, cwd, "checkout", "-q", "-b", "side", c1)
+	side := rangeCommit(t, cwd, "sidechange")
+	mustGit(t, cwd, "checkout", "-q", branch)
+
+	expectOK := func(label string, f app.SearchFilters) {
+		t.Helper()
+		if _, err := s.Search(ctx, cwd, f); err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+	}
+	expectErr := func(label string, f app.SearchFilters, want string) {
+		t.Helper()
+		res, err := s.Search(ctx, cwd, f)
+		if err == nil {
+			t.Fatalf("%s: accepted (%d results)", label, len(res))
+		}
+		if !errors.Is(err, model.ErrInvalidInput) {
+			t.Fatalf("%s: not invalid input: %v", label, err)
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: unclear error (want %q): %v", label, want, err)
+		}
+	}
+	// Valid: ancestor, equal endpoints, single-commit shorthand, one-sided.
+	expectOK("ancestor range", app.SearchFilters{CommitStart: c1, CommitEnd: c2})
+	expectOK("equal range", app.SearchFilters{CommitStart: c2, CommitEnd: c2})
+	expectOK("single commit", app.SearchFilters{Commit: c2})
+	expectOK("start only", app.SearchFilters{CommitStart: c1})
+	expectOK("end only", app.SearchFilters{CommitEnd: c2})
+	// Reversed endpoints.
+	expectErr("reversed range", app.SearchFilters{CommitStart: c2, CommitEnd: c1}, "reversed")
+	// Divergent endpoints are neither orderable nor "reversed".
+	expectErr("divergent range", app.SearchFilters{CommitStart: c2, CommitEnd: side}, "divergent")
+	expectErr("divergent range swapped", app.SearchFilters{CommitStart: side, CommitEnd: c2}, "divergent")
+}
+
 // headSHA returns the current HEAD commit of cwd.
 func headSHA(t *testing.T, cwd string) string {
 	t.Helper()
