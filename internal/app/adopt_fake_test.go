@@ -19,11 +19,12 @@ type fakeState struct {
 	entries  map[string]map[string]model.Entry // table -> id -> entry
 	links    map[string][]model.Relation       // from node -> outgoing relations
 	receipts map[string]model.Adoption         // identity+"\x00"+source+"\x00"+entryID -> receipt
+	archived map[string][]model.Adoption       // archive table -> receipts
 	messages map[string]bool
 }
 
 func newFakeState() *fakeState {
-	return &fakeState{projects: map[string]model.Project{}, entries: map[string]map[string]model.Entry{}, links: map[string][]model.Relation{}, receipts: map[string]model.Adoption{}, messages: map[string]bool{}}
+	return &fakeState{projects: map[string]model.Project{}, entries: map[string]map[string]model.Entry{}, links: map[string][]model.Relation{}, receipts: map[string]model.Adoption{}, archived: map[string][]model.Adoption{}, messages: map[string]bool{}}
 }
 
 func (s *fakeState) clone() *fakeState {
@@ -42,6 +43,9 @@ func (s *fakeState) clone() *fakeState {
 	}
 	for k, v := range s.receipts {
 		c.receipts[k] = v
+	}
+	for k, rs := range s.archived {
+		c.archived[k] = append([]model.Adoption(nil), rs...)
 	}
 	for k, v := range s.messages {
 		c.messages[k] = v
@@ -233,6 +237,23 @@ func (t *fakeTx) AdoptionsBySource(identity, source string) ([]model.Adoption, e
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SourceEntryID < out[j].SourceEntryID })
 	return out, nil
+}
+
+func (t *fakeTx) RecordArchivedAdoption(archiveTable string, a model.Adoption) error {
+	if archiveTable == "" {
+		return fmt.Errorf("%w: archived adoption requires an archive table", model.ErrInvalidInput)
+	}
+	for _, existing := range t.st.archived[archiveTable] {
+		if existing.ID == a.ID || (existing.SourceElephantID == a.SourceElephantID && existing.SourceEntryID == a.SourceEntryID) {
+			return fmt.Errorf("%w: duplicate archived adoption receipt", model.ErrStorage)
+		}
+	}
+	t.st.archived[archiveTable] = append(t.st.archived[archiveTable], a)
+	return nil
+}
+
+func (t *fakeTx) ArchivedAdoptions(archiveTable string) ([]model.Adoption, error) {
+	return append([]model.Adoption(nil), t.st.archived[archiveTable]...), nil
 }
 
 func (f *fakeStore) Backup(string) error { return nil }

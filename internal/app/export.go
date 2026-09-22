@@ -355,6 +355,7 @@ func (s *Service) Import(ctx context.Context, data []byte, asRemote string) (out
 		}
 		checkpointIDs[c.ID] = true
 	}
+	adoptIDs := map[string]bool{}
 	adoptKeys := map[string]bool{}
 	for _, a := range env.Adoptions {
 		if !validID(a.ID) || !validID(a.SourceEntryID) || !validID(a.LocalEntryID) {
@@ -369,9 +370,18 @@ func (s *Service) Import(ctx context.Context, data []byte, asRemote string) (out
 		if validID(a.SourceElephantID) && a.SourceElephantID == a.LocalEntryID {
 			return out, fmt.Errorf("%w: adoption provenance is self-referential", model.ErrInvalidInput)
 		}
-		adoptKeys[a.SourceElephantID+"\x00"+a.SourceEntryID] = true
+		if adoptIDs[a.ID] {
+			return out, fmt.Errorf("%w: duplicate adoption receipt ID", model.ErrInvalidInput)
+		}
+		// One archive cannot carry two receipts for the same source entry:
+		// provenance must stay unambiguous.
+		key := a.SourceElephantID + "\x00" + a.SourceEntryID
+		if adoptKeys[key] {
+			return out, fmt.Errorf("%w: duplicate adoption receipt for source entry %s", model.ErrInvalidInput, a.SourceEntryID)
+		}
+		adoptIDs[a.ID] = true
+		adoptKeys[key] = true
 	}
-	_ = adoptKeys
 	// Idempotency: an identical reimport returns the existing source; the
 	// same name with conflicting content fails explicitly (Message reports a
 	// digest mismatch).
@@ -428,8 +438,11 @@ func (s *Service) Import(ctx context.Context, data []byte, asRemote string) (out
 				return err
 			}
 		}
+		// Imported receipts stay archived under this archive's table. They
+		// never enter the live adoption registry, so they cannot satisfy,
+		// shadow, or overwrite a local adoption decision.
 		for _, a := range env.Adoptions {
-			if err = tx.RecordAdoption(a); err != nil {
+			if err = tx.RecordArchivedAdoption(src.TableName, a); err != nil {
 				return err
 			}
 		}

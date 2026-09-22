@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"sort"
 
 	gitrepo "elephant/internal/git"
 	"elephant/internal/model"
@@ -16,6 +17,7 @@ type SourceInspection struct {
 	Entries       []model.Entry      `json:"entries"`
 	Evidence      []model.Evidence   `json:"evidence"`
 	Checkpoints   []model.Checkpoint `json:"checkpoints"`
+	Adoptions     []model.Adoption   `json:"adoptions"`
 	AdoptionCount int                `json:"adoption_count"`
 }
 
@@ -46,10 +48,10 @@ func (s *Service) InspectSource(ctx context.Context, cwd, selector string) (out 
 			}
 		}
 		out.Source = src
-		println("DEBUG inspect table:", src.TableName, "selector:", selector)
 		out.Entries = []model.Entry{}
 		out.Evidence = []model.Evidence{}
 		out.Checkpoints = []model.Checkpoint{}
+		out.Adoptions = []model.Adoption{}
 		offset := 0
 		for {
 			page, err := tx.List(src, model.Filter{Limit: 200, Offset: offset})
@@ -74,7 +76,6 @@ func (s *Service) InspectSource(ctx context.Context, cwd, selector string) (out 
 		}
 		for offset := 0; ; offset += 200 {
 			page, err := tx.ListCheckpoints(src, 200, offset)
-			println("DEBUG ListCheckpoints page:", len(page), "err:", err == nil, "table:", src.TableName)
 			if err != nil {
 				return err
 			}
@@ -86,11 +87,28 @@ func (s *Service) InspectSource(ctx context.Context, cwd, selector string) (out 
 				break
 			}
 		}
+		// A real remote source keeps its receipts in the live registry; an
+		// imported archive keeps them archived under its own table. Exactly
+		// one of the two can hold rows for a given source, so summing reports
+		// every receipt without ever promoting archived rows into the
+		// registry.
+		archived, err := tx.ArchivedAdoptions(src.TableName)
+		if err != nil {
+			return err
+		}
+		out.Adoptions = append(out.Adoptions, archived...)
 		receipts, err := tx.AdoptionsBySource(g.Identity, src.SourceElephantID)
 		if err != nil {
 			return err
 		}
-		out.AdoptionCount = len(receipts)
+		out.Adoptions = append(out.Adoptions, receipts...)
+		sort.Slice(out.Adoptions, func(i, j int) bool {
+			if !out.Adoptions[i].CreatedAt.Equal(out.Adoptions[j].CreatedAt) {
+				return out.Adoptions[i].CreatedAt.Before(out.Adoptions[j].CreatedAt)
+			}
+			return out.Adoptions[i].ID < out.Adoptions[j].ID
+		})
+		out.AdoptionCount = len(out.Adoptions)
 		return nil
 	})
 	return

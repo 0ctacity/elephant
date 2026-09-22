@@ -85,3 +85,53 @@ func (t *transaction) AdoptionsBySource(identity, source string) ([]model.Adopti
 	}
 	return out, nil
 }
+
+// ensureArchivedAdoptionsTable is idempotent so an imported archive can carry
+// its own receipt rows without touching the live adoption registry. The table
+// is scoped by the globally unique archive table name and repeats the live
+// registry's provenance uniqueness, so one archive cannot hold two receipts
+// for the same source entry.
+func (t *transaction) ensureArchivedAdoptionsTable() error {
+	err := t.db.Exec(`CREATE TABLE IF NOT EXISTS archived_adoptions(archive_table TEXT NOT NULL,id TEXT NOT NULL,project_identity TEXT NOT NULL,source_elephant_id TEXT NOT NULL,source_entry_id TEXT NOT NULL,local_entry_id TEXT NOT NULL,kind TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(archive_table,id),UNIQUE(archive_table,source_elephant_id,source_entry_id));
+CREATE INDEX IF NOT EXISTS archived_adoptions_table ON archived_adoptions(archive_table);`)
+	if err != nil {
+		return fmt.Errorf("%w: %w", model.ErrStorage, err)
+	}
+	return nil
+}
+
+// RecordArchivedAdoption files one receipt from an imported archive. The rows
+// are written in the caller's transaction, so a failed import rolls them back
+// together with the archive's tables and rows.
+func (t *transaction) RecordArchivedAdoption(archiveTable string, a model.Adoption) error {
+	if archiveTable == "" {
+		return fmt.Errorf("%w: archived adoption requires an archive table", model.ErrInvalidInput)
+	}
+	if err := t.ensureArchivedAdoptionsTable(); err != nil {
+		return err
+	}
+	_, err := t.query("INSERT INTO archived_adoptions VALUES(?,?,?,?,?,?,?,?)",
+		archiveTable, a.ID, a.ProjectIdentity, a.SourceElephantID, a.SourceEntryID, a.LocalEntryID, a.Kind, stamp(a.CreatedAt))
+	return err
+}
+
+// ArchivedAdoptions lists one archive's receipts in a stable order.
+func (t *transaction) ArchivedAdoptions(archiveTable string) ([]model.Adoption, error) {
+	if err := t.ensureArchivedAdoptionsTable(); err != nil {
+		return nil, err
+	}
+	rows, err := t.query("SELECT id,project_identity,source_elephant_id,source_entry_id,local_entry_id,kind,created_at FROM archived_adoptions WHERE archive_table=? ORDER BY created_at,id",
+		archiveTable)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Adoption, 0, len(rows))
+	for _, r := range rows {
+		c, err := parseTime(r[6])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, model.Adoption{ID: value(r[0]), ProjectIdentity: value(r[1]), SourceElephantID: value(r[2]), SourceEntryID: value(r[3]), LocalEntryID: value(r[4]), Kind: value(r[5]), CreatedAt: c})
+	}
+	return out, nil
+}
