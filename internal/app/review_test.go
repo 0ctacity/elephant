@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,4 +155,311 @@ func TestReviewFindingsAndReadOnly(t *testing.T) {
 		t.Fatal("missing stale remote finding")
 	}
 	_ = os.Getenv("unused")
+}
+
+// reviewHead returns the current HEAD commit of cwd.
+func reviewHead(t *testing.T, cwd string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatal(string(out), err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestReviewUsesEvidenceRecordsForFacts: UNVERIFIED_FACT follows evidence
+// verification timestamps, not entry UpdatedAt. Editing a row does not
+// verify a fact, and a freshly edited row with stale evidence stays flagged.
+func TestReviewUsesEvidenceRecordsForFacts(t *testing.T) {
+	ctx := context.Background()
+	cwd := reviewRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "evidencefacts.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	// Recently edited, but its only evidence verification is older than the
+	// 90-day default: must still be flagged.
+	fresh, err := s.Add(ctx, cwd, model.Fact, app.CreateInput{Title: "Fresh edit", Body: "recently touched"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stale row, evidence verified just now: must not be flagged.
+	staleID := uuid.Must(uuid.NewV7()).String()
+	commit := reviewHead(t, cwd)
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		e := model.Entry{ID: staleID, ActorID: "tester", Kind: model.Fact, Title: "Stale edit", Body: "old row", Status: "active", CreatedAt: now.Add(-200 * 24 * time.Hour), UpdatedAt: now.Add(-200 * 24 * time.Hour)}
+		if err := tx.Put(status.Project, e); err != nil {
+			return err
+		}
+		return tx.PutEvidence(status.Project, model.Evidence{ID: uuid.Must(uuid.NewV7()).String(), EntryID: staleID, Path: "evidence.txt", Commit: commit, Blob: "bogusdigest", CreatedAt: now.Add(-time.Hour), VerifiedAt: now})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		return tx.PutEvidence(status.Project, model.Evidence{ID: uuid.Must(uuid.NewV7()).String(), EntryID: fresh.Entry.ID, Path: "evidence.txt", Commit: commit, Blob: "bogusdigest", CreatedAt: now.Add(-101 * 24 * time.Hour), VerifiedAt: now.Add(-100 * 24 * time.Hour)})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagged := map[string]bool{}
+	for _, f := range findings {
+		if f.Code == app.CodeUnverifiedFact {
+			flagged[f.EntryID] = true
+		}
+	}
+	if !flagged[fresh.Entry.ID] {
+		t.Fatal("fresh edit with 100-day-old evidence verification not flagged")
+	}
+	if flagged[staleID] {
+		t.Fatal("fact flagged from UpdatedAt although evidence verified today")
+	}
+}
+
+// TestReviewEvidenceFindings: evidence review reports stable codes for each
+// state; unchanged evidence is silent, an unreadable baseline is reported as
+// unavailable, and confirmed problems (changed, missing) get distinct codes.
+func TestReviewEvidenceFindings(t *testing.T) {
+	ctx := context.Background()
+	cwd := reviewRepo(t)
+	writeWorkingFile(t, cwd, "evidence.txt", "first line\n")
+	commitFile(t, cwd, "evidence.txt", "add evidence fixture")
+	db, err := zova.Open(filepath.Join(t.TempDir(), "evidencestate.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backed, err := s.Add(ctx, cwd, model.Fact, app.CreateInput{Title: "Backed fact", Body: "has evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Evidence pinned to a commit this repository cannot read: unavailable.
+	unverID := uuid.Must(uuid.NewV7()).String()
+	now := time.Now().UTC()
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		e := model.Entry{ID: unverID, ActorID: "tester", Kind: model.Fact, Title: "Foreign baseline", Body: "unreadable", Status: "active", CreatedAt: now, UpdatedAt: now}
+		if err := tx.Put(status.Project, e); err != nil {
+			return err
+		}
+		return tx.PutEvidence(status.Project, model.Evidence{ID: uuid.Must(uuid.NewV7()).String(), EntryID: unverID, Path: "evidence.txt", Commit: strings.Repeat("f", 40), Blob: "deadbeef", CreatedAt: now.Add(-time.Hour), VerifiedAt: now})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := s.AddEvidence(ctx, cwd, backed.Entry.ID, "evidence.txt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != model.EvidenceUnchanged {
+		t.Fatalf("fresh evidence state: %s (%s)", view.State, view.Detail)
+	}
+	codesFor := func(findings []app.ReviewFinding, entryID string) map[string]bool {
+		out := map[string]bool{}
+		for _, f := range findings {
+			if f.EntryID == entryID && strings.HasPrefix(f.Code, "EVIDENCE_") {
+				out[f.Code] = true
+			}
+		}
+		return out
+	}
+	findings, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := codesFor(findings, backed.Entry.ID); len(got) != 0 {
+		t.Fatalf("unchanged evidence reported: %+v", got)
+	}
+	// Evidence codes are the stable wire format shared by human and JSON
+	// output; assert the literals directly.
+	if !codesFor(findings, unverID)["EVIDENCE_UNAVAILABLE"] {
+		t.Fatalf("unreadable baseline not reported as unavailable: %+v", findings)
+	}
+	// Change the working file: confirmed inconsistency, not unavailability.
+	writeWorkingFile(t, cwd, "evidence.txt", "second line\ndifferent content\n")
+	findings, err = s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !codesFor(findings, backed.Entry.ID)["EVIDENCE_CHANGED"] {
+		t.Fatalf("changed evidence not reported: %+v", findings)
+	}
+	// Remove the working file: missing, distinct from unavailable.
+	if err := os.Remove(filepath.Join(cwd, "evidence.txt")); err != nil {
+		t.Fatal(err)
+	}
+	findings, err = s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !codesFor(findings, backed.Entry.ID)["EVIDENCE_MISSING"] {
+		t.Fatalf("missing evidence not reported: %+v", findings)
+	}
+}
+
+// TestReviewsImportedSourcesWithoutRemotes: review scans every stored
+// source table, including imported archives with no registered remote, and
+// keeps those findings source-separated from local ones.
+func TestReviewsImportedSourcesWithoutRemotes(t *testing.T) {
+	ctx := context.Background()
+	cwd := reviewRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "importedsource.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old := now.Add(-40 * 24 * time.Hour)
+	err = db.Transact(ctx, func(tx storage.Tx) error {
+		src, err := tx.EnsureSource(status.Project, "imported-archive")
+		if err != nil {
+			return err
+		}
+		e := model.Entry{ID: "imported-old-task", ActorID: "tester", Kind: model.Task, Title: "Imported", Body: "stale", Status: "open", CreatedAt: old, UpdatedAt: old}
+		return tx.Put(src, e)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No remote is registered for this source: review must scan it anyway.
+	var remotes []model.Remote
+	if err := db.Transact(ctx, func(tx storage.Tx) error {
+		var err error
+		remotes, err = tx.Remotes()
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(remotes) != 0 {
+		t.Fatalf("test setup: unexpected remotes %+v", remotes)
+	}
+	findings, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Code == app.CodeStaleTask && f.Source == "remote:imported-archive" && f.EntryID == "imported-old-task" {
+			found = true
+		}
+		if f.Source == "local" && f.EntryID == "imported-old-task" {
+			t.Fatalf("imported entry attributed to local: %+v", f)
+		}
+	}
+	if !found {
+		t.Fatalf("imported source without remote not reviewed: %+v", findings)
+	}
+}
+
+// reviewState is the storage state Review must never change.
+type reviewState struct {
+	Entries   []model.Entry
+	Relations []model.Relation
+	Evidence  []model.Evidence
+}
+
+func reviewSnapshot(t *testing.T, ctx context.Context, transact func(context.Context, func(storage.Tx) error) error, p model.Project) reviewState {
+	t.Helper()
+	var out reviewState
+	if err := transact(ctx, func(tx storage.Tx) error {
+		entries, err := tx.List(p, model.Filter{Limit: 200})
+		if err != nil {
+			return err
+		}
+		out.Entries = entries
+		for _, e := range entries {
+			links, err := tx.Relations(model.EntryNode(p, e.ID))
+			if err != nil {
+				return err
+			}
+			out.Relations = append(out.Relations, links...)
+			ev, err := tx.Evidence(p, e.ID)
+			if err != nil {
+				return err
+			}
+			out.Evidence = append(out.Evidence, ev...)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestReviewDeterministicAndReadOnly: repeated reviews over identical state
+// return identical, fully ordered findings and leave entries, relations, and
+// evidence untouched.
+func TestReviewDeterministicAndReadOnly(t *testing.T) {
+	ctx := context.Background()
+	cwd := reviewRepo(t)
+	db, err := zova.Open(filepath.Join(t.TempDir(), "deterministic.zova"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := app.New(db)
+	if _, err := s.Add(ctx, cwd, model.Fact, app.CreateInput{Title: "Gone", Body: "b", RelatedFiles: []string{"gone.go"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, cwd, model.Task, app.CreateInput{Title: "Do", Body: "later"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.Status(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Warm-up run so lazy migrations are not attributed to Review.
+	if _, err := s.Review(ctx, cwd, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := reviewSnapshot(t, ctx, db.Transact, status.Project)
+	first, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Review(ctx, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := reviewSnapshot(t, ctx, db.Transact, status.Project)
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("review is not deterministic:\n%+v\n%+v", first, second)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("review mutated storage:\nbefore %+v\nafter %+v", before, after)
+	}
+	// Full ordering: Code, Source, EntryID, Detail.
+	for i := 1; i < len(first); i++ {
+		prev, cur := first[i-1], first[i]
+		less := prev.Code < cur.Code ||
+			(prev.Code == cur.Code && prev.Source < cur.Source) ||
+			(prev.Code == cur.Code && prev.Source == cur.Source && prev.EntryID < cur.EntryID) ||
+			(prev.Code == cur.Code && prev.Source == cur.Source && prev.EntryID == cur.EntryID && prev.Detail < cur.Detail)
+		if !less && (prev.Code != cur.Code || prev.Source != cur.Source || prev.EntryID != cur.EntryID || prev.Detail != cur.Detail) {
+			t.Fatalf("findings out of order at %d: %+v then %+v", i, prev, cur)
+		}
+	}
+	if len(first) == 0 {
+		t.Fatal("expected findings for the fixture")
+	}
 }

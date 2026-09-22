@@ -24,6 +24,8 @@ const (
 	CodeUnknownActor        = "UNKNOWN_ACTOR"
 	CodeStaleRemote         = "STALE_REMOTE"
 	CodeEvidenceUnavailable = "EVIDENCE_UNAVAILABLE"
+	CodeEvidenceChanged     = "EVIDENCE_CHANGED"
+	CodeEvidenceMissing     = "EVIDENCE_MISSING"
 )
 
 // ReviewFinding is one deterministic, read-only health candidate.
@@ -99,15 +101,17 @@ func (s *Service) Review(ctx context.Context, cwd string, opts *ReviewOptions) (
 		if err != nil {
 			return err
 		}
-		for _, r := range remotes {
-			if r.ElephantID == "" {
+		// Review every stored source table, including imported archives and
+		// sources whose remote is no longer registered.
+		sources, err := tx.Sources()
+		if err != nil {
+			return err
+		}
+		for _, src := range sources {
+			if src.SourceElephantID == "" {
 				continue
 			}
-			src, err := tx.Source(g.Identity, r.ElephantID)
-			if err != nil {
-				continue
-			}
-			tables = append(tables, table{src, "remote:" + r.ElephantID})
+			tables = append(tables, table{src, "remote:" + src.SourceElephantID})
 		}
 		for _, t := range tables {
 			entries, err := allEntries(tx, t.project)
@@ -127,10 +131,56 @@ func (s *Service) Review(ctx context.Context, cwd string, opts *ReviewOptions) (
 						out = append(out, ReviewFinding{Code: CodeStaleTask, Severity: "low", Source: t.source, EntryID: e.ID, Detail: fmt.Sprintf("task %s untouched for %d days (status %s)", e.ID, o.StaleTaskDays, e.Status), Action: "complete, cancel, or update the task explicitly"})
 					}
 				}
+				evidence, err := tx.Evidence(t.project, e.ID)
+				if err != nil {
+					return err
+				}
 				if e.Kind == model.Fact && e.Status == "active" {
-					if now.Sub(e.UpdatedAt) > time.Duration(o.UnverifiedFactDays)*24*time.Hour {
-						out = append(out, ReviewFinding{Code: CodeUnverifiedFact, Severity: "low", Source: t.source, EntryID: e.ID, Detail: fmt.Sprintf("fact %s not verified for %d days", e.ID, o.UnverifiedFactDays), Action: "verify the fact explicitly or retire it"})
+					// Verification comes from evidence records, not the
+					// entry timestamp: editing a row does not re-verify a
+					// fact, and stale evidence stays flagged on a fresh row.
+					var verified time.Time
+					for _, ev := range evidence {
+						if ev.VerifiedAt.After(verified) {
+							verified = ev.VerifiedAt
+						}
 					}
+					if verified.IsZero() || now.Sub(verified) > time.Duration(o.UnverifiedFactDays)*24*time.Hour {
+						out = append(out, ReviewFinding{Code: CodeUnverifiedFact, Severity: "low", Source: t.source, EntryID: e.ID, Detail: fmt.Sprintf("fact %s has no evidence verification for %d days", e.ID, o.UnverifiedFactDays), Action: "verify the fact explicitly or retire it"})
+					}
+				}
+				for _, ev := range evidence {
+					if t.source != "local" {
+						// Remote evidence baselines live in the peer
+						// checkout: unavailable, not confirmed inconsistent.
+						out = append(out, ReviewFinding{Code: CodeEvidenceUnavailable, Severity: "low", Source: t.source, EntryID: e.ID, Detail: fmt.Sprintf("evidence %q cannot be confirmed from this checkout", ev.Path), Action: "inspect the source checkout before adopting"})
+						continue
+					}
+					view, err := verifyEvidence(ctx, g.Root, ev)
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					if err != nil {
+						return err
+					}
+					finding := ReviewFinding{Source: t.source, EntryID: e.ID, Detail: fmt.Sprintf("evidence %q: %s", ev.Path, view.Detail)}
+					switch view.State {
+					case model.EvidenceUnchanged:
+						continue
+					case model.EvidenceChanged:
+						finding.Code = CodeEvidenceChanged
+						finding.Severity = "medium"
+						finding.Action = "confirm the change and refresh the evidence explicitly"
+					case model.EvidenceMissing:
+						finding.Code = CodeEvidenceMissing
+						finding.Severity = "medium"
+						finding.Action = "restore the referenced content or retire the evidence explicitly"
+					default: // unavailable: baseline cannot be read here
+						finding.Code = CodeEvidenceUnavailable
+						finding.Severity = "low"
+						finding.Action = "re-record the evidence or retry when the baseline is readable"
+					}
+					out = append(out, finding)
 				}
 				if e.Kind == model.Decision && e.Status == "superseded" {
 					incoming, err := tx.Incoming(model.EntryNode(t.project, e.ID))
@@ -201,7 +251,10 @@ func (s *Service) Review(ctx context.Context, cwd string, opts *ReviewOptions) (
 		if out[i].Source != out[j].Source {
 			return out[i].Source < out[j].Source
 		}
-		return out[i].EntryID < out[j].EntryID
+		if out[i].EntryID != out[j].EntryID {
+			return out[i].EntryID < out[j].EntryID
+		}
+		return out[i].Detail < out[j].Detail
 	})
 	return
 }
